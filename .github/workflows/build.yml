@@ -24,7 +24,7 @@ jobs:
         run: sdkmanager "platforms;android-35" "build-tools;35.0.0" "platform-tools"
 
       - name: 缓存 Gradle 依赖
-        uses: actions/setup-gradle@v4
+        uses: gradle/actions/setup-gradle@v4
 
       - name: 构建 devDebug APK
         run: chmod +x ./gradlew && ./gradlew --no-daemon assembleDevDebug
