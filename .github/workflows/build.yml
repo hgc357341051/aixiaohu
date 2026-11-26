@@ -7,6 +7,8 @@ on:
 jobs:
   build:
     runs-on: ubuntu-latest
+    permissions:
+      contents: write
     steps:
       - name: 拉取代码
         uses: actions/checkout@v4
@@ -49,3 +51,24 @@ jobs:
           name: voicectl-dev-debug-${{ github.sha }}
           path: artifacts/*.apk
           retention-days: 14
+
+      - name: 发布 GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: dev-${{ github.run_id }}-r${{ github.run_attempt }}
+          name: devDebug #${{ github.run_number }} (${{ github.sha }})
+          body: |
+            ✅ 自动构建成功，已生成可安装的 devDebug APK。
+
+            - Commit: `${{ github.sha }}`
+            - Branch: `${{ github.ref_name }}`
+            - Workflow run: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+            - APK: `app-dev-debug-${{ github.sha }}.apk`
+
+            说明：该版本为自动构建的预发布包，TFLite 真实模型与声纹模板仍待集成。
+          prerelease: true
+          draft: false
+          files: artifacts/*.apk
+          fail_on_unmatched_files: true
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
