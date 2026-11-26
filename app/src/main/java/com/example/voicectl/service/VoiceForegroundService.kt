@@ -102,9 +102,9 @@ class VoiceForegroundService : Service() {
             .setContentText(info.notif)
             .setContentIntent(open)
             .setOngoing(true)
-            .addAction(Notification.Action.Builder(null, "暂停", pause).build())
-            .addAction(Notification.Action.Builder(null, "退出", exit).build())
-            .addAction(Notification.Action.Builder(null, "恢复", resume).build())
+            .addAction(Notification.Action.Builder(android.R.drawable.ic_media_pause, "暂停", pause).build())
+            .addAction(Notification.Action.Builder(android.R.drawable.ic_delete, "退出", exit).build())
+            .addAction(Notification.Action.Builder(android.R.drawable.ic_media_play, "恢复", resume).build())
             .build()
     }
 

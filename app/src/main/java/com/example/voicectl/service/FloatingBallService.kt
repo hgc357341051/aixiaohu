@@ -16,6 +16,7 @@ import android.widget.TextView
 import com.example.voicectl.App
 import com.example.voicectl.inference.api.ControlWord
 import com.example.voicectl.machine.VoiceEvent
+import com.example.voicectl.machine.VoiceState
 
 /** 悬浮球：C1 退出后唯一语音恢复入口之一；无悬浮窗权限时自动不可用 */
 class FloatingBallService : Service() {
@@ -41,8 +42,17 @@ class FloatingBallService : Service() {
         val detector = GestureDetector(this, object : GestureDetector.SimpleOnGestureListener() {
             override fun onSingleTapConfirmed(e: MotionEvent): Boolean {
                 val machine = (application as App).container.stateMachine
-                machine.send(VoiceEvent.Start)
-                machine.send(VoiceEvent.WakeVerified(1f))
+                when (machine.currentState()) {
+                    VoiceState.MANUAL_SILENT, VoiceState.RECOG_OFF, VoiceState.ERROR,
+                    VoiceState.COOLDOWN, VoiceState.PAUSED, VoiceState.UNLOAD_WAKE
+                    -> machine.send(VoiceEvent.ManualResume)
+                    VoiceState.IDLE -> {
+                        machine.send(VoiceEvent.Start)
+                        machine.send(VoiceEvent.WakeVerified(1f))
+                    }
+                    VoiceState.LISTEN, VoiceState.VERIFY -> machine.send(VoiceEvent.WakeVerified(1f))
+                    VoiceState.CMD_WINDOW, VoiceState.EXECUTE -> Unit
+                }
                 return true
             }
             override fun onDoubleTap(e: MotionEvent): Boolean {

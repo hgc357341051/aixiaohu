@@ -53,6 +53,19 @@ fun AppNavHost(vm: AppViewModel, container: AppContainer, context: Context) {
     val uiState by vm.ui.collectAsState()
     var shadeOpen by remember { mutableStateOf(false) }
 
+    val navigateTab: (String) -> Unit = navigateTab@{ route ->
+        val target = if (route == "home") {
+            "home/${uiState.voiceState.ui().key}"
+        } else {
+            route
+        }
+        if (nav.currentDestination?.route == target) return@navigateTab
+        nav.navigate(target) {
+            launchSingleTop = true
+            popUpTo(target) { inclusive = true }
+        }
+    }
+
     LaunchedEffect(uiState.voiceState) {
         val route = nav.currentDestination?.route
         val target = "home/${uiState.voiceState.ui().key}"
@@ -96,7 +109,7 @@ fun AppNavHost(vm: AppViewModel, container: AppContainer, context: Context) {
             composable("home/{state}") {
                 HomeScreen(
                     uiState = uiState,
-                    onTab = { route -> nav.navigate(if (route == "debug") "debug" else route) },
+                    onTab = navigateTab,
                     onNotification = { shadeOpen = true },
                     onOpenWindow = vm::openWindow,
                     onPause = vm::pause,
@@ -107,7 +120,7 @@ fun AppNavHost(vm: AppViewModel, container: AppContainer, context: Context) {
             composable("settings") {
                 SettingsScreen(
                     vm = viewModel(factory = SimpleVmFactory { SettingsViewModel(container) }),
-                    onTab = { route -> nav.navigate(if (route == "debug") "debug" else route) },
+                    onTab = navigateTab,
                     onVoiceprint = { nav.navigate("voiceprint") },
                     onMapping = { nav.navigate("mapping") },
                     onAdb = { nav.navigate("adb") },
@@ -118,12 +131,12 @@ fun AppNavHost(vm: AppViewModel, container: AppContainer, context: Context) {
                 VoiceprintScreen(
                     vm = viewModel(factory = SimpleVmFactory { VoiceprintViewModel(container) }),
                     onBack = { nav.popBackStack() },
-                    onTab = { route -> nav.navigate(if (route == "debug") "debug" else route) },
+                    onTab = navigateTab,
                 )
             }
             composable("panel") {
                 PanelScreen(
-                    onTab = { route -> nav.navigate(if (route == "debug") "debug" else route) },
+                    onTab = navigateTab,
                     onRunCommand = { id ->
                         vm.runCommand(id)
                         nav.navigate("home/executing") { launchSingleTop = true }
@@ -135,14 +148,14 @@ fun AppNavHost(vm: AppViewModel, container: AppContainer, context: Context) {
                     vm = viewModel(factory = SimpleVmFactory { AdbViewModel(container) }),
                     onBack = { nav.popBackStack() },
                     onMapping = { nav.navigate("mapping") },
-                    onTab = { route -> nav.navigate(if (route == "debug") "debug" else route) },
+                    onTab = navigateTab,
                 )
             }
             composable("mapping") {
                 MappingScreen(
                     vm = viewModel(factory = SimpleVmFactory { MappingViewModel() }),
                     onBack = { nav.popBackStack() },
-                    onTab = { route -> nav.navigate(if (route == "debug") "debug" else route) },
+                    onTab = navigateTab,
                 )
             }
             if (BuildConfig.DEBUG_PAGE_VISIBLE) {
@@ -150,7 +163,7 @@ fun AppNavHost(vm: AppViewModel, container: AppContainer, context: Context) {
                     DebugScreen(
                         vm = viewModel(factory = SimpleVmFactory { DebugViewModel(container) }),
                         appVm = vm,
-                        onTab = { route -> nav.navigate(route) },
+                        onTab = navigateTab,
                     )
                 }
             }
@@ -184,8 +197,4 @@ fun AppNavHost(vm: AppViewModel, container: AppContainer, context: Context) {
 class SimpleVmFactory<V : ViewModel>(private val creator: () -> V) : ViewModelProvider.Factory {
     @Suppress("UNCHECKED_CAST")
     override fun <T : ViewModel> create(modelClass: Class<T>): T = creator() as T
-}
-
-private fun NavHostController.goTab(route: String) {
-    navigate(route) { launchSingleTop = true }
 }

@@ -33,7 +33,12 @@ class VoiceprintViewModel(private val container: AppContainer) : ViewModel() {
     }
 
     fun selfTest() = viewModelScope.launch {
-        _message.value = "已启动自测：本人接受率 98.6% / 他人冒认率 0.4%（示意，需真机真人标定）"
+        val hasTemplate = container.currentFactory.speakerVerifier().hasTemplate()
+        _message.value = if (!hasTemplate) {
+            "尚无本人声纹模板，无法自测，请先注册"
+        } else {
+            "自测需要真机真人标定样本，当前未接入标定流程，无法给出接受率与冒认率"
+        }
     }
 
     fun deleteTemplate() {

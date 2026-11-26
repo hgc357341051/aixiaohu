@@ -74,9 +74,16 @@ class TfliteEngine(
     fun run(input: FloatArray, outputSize: Int = spec.output): FloatArray {
         val engine = interpreter ?: throw IllegalStateException("$name 未加载")
         val size = spec.input
-        require(input.size == size) { "$name 输入长度应为 $size，实际 ${input.size}" }
+        // 同一条特征流水线会产出 400/1280/192 维窗口；这里按模型输入长度做尾部对齐。
+        // 真实模型到位后应替换为模型专属特征提取，而不是简单补零/截断。
+        val modelInput = FloatArray(size)
+        if (input.size >= size) {
+            System.arraycopy(input, input.size - size, modelInput, 0, size)
+        } else {
+            System.arraycopy(input, 0, modelInput, size - input.size, input.size)
+        }
         val inBuffer = ByteBuffer.allocateDirect(size * 4).order(ByteOrder.nativeOrder())
-        input.forEach { inBuffer.putFloat(it) }
+        modelInput.forEach { inBuffer.putFloat(it) }
         val outBuffer = ByteBuffer.allocateDirect(outputSize * 4).order(ByteOrder.nativeOrder())
         engine.run(inBuffer, outBuffer)
         outBuffer.rewind()

@@ -6,6 +6,7 @@ import androidx.lifecycle.ViewModelProvider
 import androidx.lifecycle.viewModelScope
 import com.example.voicectl.config.AppConfig
 import com.example.voicectl.di.AppContainer
+import com.example.voicectl.domain.VoiceMetrics
 import com.example.voicectl.inference.api.ActionLabel
 import com.example.voicectl.inference.api.CommandResult
 import com.example.voicectl.inference.api.ControlWord
@@ -21,6 +22,7 @@ import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.update
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import java.text.SimpleDateFormat
 import java.util.Date
@@ -34,12 +36,14 @@ class AppViewModel(private val container: AppContainer) : ViewModel() {
         val toast: String? = null,
         val showExitConfirm: Boolean = false,
         val isDemo: Boolean = true,
+        val metrics: VoiceMetrics = VoiceMetrics(),
     )
 
-    private val _ui = MutableStateFlow(UiState(config = container.config, isDemo = container.isDemoMode))
+    private val _ui = MutableStateFlow(
+        UiState(config = container.config, isDemo = container.isDemoMode, metrics = container.metrics.value),
+    )
     val ui: StateFlow<UiState> = _ui.asStateFlow()
 
-    private val dateFormat = SimpleDateFormat("HH:mm:ss", Locale.CHINA)
     private val handler = container.createActionHandler { type, text ->
         addLog("${type.name} $text")
         _ui.update { it.copy(toast = text) }
@@ -52,7 +56,7 @@ class AppViewModel(private val container: AppContainer) : ViewModel() {
                 container.refreshNotification()
             }
         }
-        viewModelScope.launch {
+        viewModelScope.launch(Dispatchers.Default) {
             container.stateMachine.effects.collect { effect ->
                 if (effect is SideEffect.RequestConfirmExit) {
                     _ui.update { it.copy(showExitConfirm = true) }
@@ -65,10 +69,14 @@ class AppViewModel(private val container: AppContainer) : ViewModel() {
                 _ui.update { it.copy(config = config, isDemo = container.isDemoMode) }
             }
         }
+        viewModelScope.launch {
+            container.metrics.collect { metrics ->
+                _ui.update { it.copy(metrics = metrics) }
+            }
+        }
     }
 
     fun startVoice() {
-        container.loadModels()
         container.stateMachine.send(VoiceEvent.Start)
     }
 
@@ -142,7 +150,8 @@ class AppViewModel(private val container: AppContainer) : ViewModel() {
     }
 
     private fun addLog(line: String) {
-        val stamped = "[${dateFormat.format(Date())}] $line"
+        val time = SimpleDateFormat("HH:mm:ss", Locale.CHINA).format(Date())
+        val stamped = "[$time] $line"
         _ui.update { it.copy(logs = (it.logs + stamped).takeLast(40)) }
     }
 }

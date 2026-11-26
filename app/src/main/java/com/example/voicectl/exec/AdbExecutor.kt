@@ -1,5 +1,7 @@
 package com.example.voicectl.exec
 
+import android.os.SystemClock
+
 /** 备用执行链路：通过 PC 桥接服务发送规范化点击请求；失败即停，重试不超过 1 次 */
 class AdbExecutor(
     private val clientProvider: () -> AdbClient,
@@ -16,11 +18,24 @@ class AdbExecutor(
 
     override val name: String = "ADB 桥接"
 
-    override fun isAvailable(): Boolean = true
+    @Volatile
+    private var lastHeartbeatOk = true
+
+    @Volatile
+    private var lastHeartbeatCheckMs = 0L
+
+    val adbReachable: Boolean get() = lastHeartbeatOk
+
+    override fun isAvailable(): Boolean =
+        lastHeartbeatOk || SystemClock.elapsedRealtime() - lastHeartbeatCheckMs >= RETRY_INTERVAL_MS
 
     override suspend fun execute(action: CommandAction): ExecResult {
         val client = clientProvider()
-        if (!client.heartbeat()) return ExecResult(false, "桥接服务未连接")
+        val online = client.heartbeat()
+        lastHeartbeatOk = online
+        lastHeartbeatCheckMs = SystemClock.elapsedRealtime()
+        if (!online) return ExecResult(false, "桥接服务未连接")
+
         val size = client.wmSize().getOrElse { AdbClient.Size(fallbackSize().first, fallbackSize().second) }
         var lastError = ""
 
@@ -44,5 +59,9 @@ class AdbExecutor(
             if (!failed) return ExecResult(true, "ADB 执行完成：${action.name}（基准 ${size.width}×${size.height}）")
         }
         return ExecResult(false, lastError.ifBlank { "ADB 执行失败" })
+    }
+
+    private companion object {
+        const val RETRY_INTERVAL_MS = 30_000L
     }
 }

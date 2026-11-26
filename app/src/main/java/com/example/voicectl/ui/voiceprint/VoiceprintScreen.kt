@@ -3,12 +3,13 @@ package com.example.voicectl.ui.voiceprint
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.RowScope
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
-import androidx.compose.material3.Button
-import androidx.compose.material3.ButtonDefaults
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.Fingerprint
 import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
@@ -23,18 +24,21 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import com.example.voicectl.ui.common.ConfirmDialog
-import com.example.voicectl.ui.common.InfoCard
-import com.example.voicectl.ui.common.PillChip
+import com.example.voicectl.ui.common.DangerButton
+import com.example.voicectl.ui.common.IconCircle
+import com.example.voicectl.ui.common.MetricCard
+import com.example.voicectl.ui.common.SecondaryButton
+import com.example.voicectl.ui.common.SectionCard
 import com.example.voicectl.ui.common.SectionTitle
 import com.example.voicectl.ui.common.ScreenFrame
+import com.example.voicectl.ui.common.StatusBadge
+import com.example.voicectl.ui.common.Tone
 import com.example.voicectl.ui.common.ToggleRow
 import com.example.voicectl.ui.common.WarningCard
 import com.example.voicectl.ui.theme.Brand
 import com.example.voicectl.ui.theme.BrandSoft
-import com.example.voicectl.ui.theme.Danger
-import com.example.voicectl.ui.theme.DangerBg
 import com.example.voicectl.ui.theme.Muted
-import com.example.voicectl.ui.theme.Ok
+import com.example.voicectl.ui.theme.Spacing
 
 @Composable
 fun VoiceprintScreen(
@@ -47,71 +51,94 @@ fun VoiceprintScreen(
     var showDeleteDialog by remember { mutableStateOf(false) }
 
     ScreenFrame(title = "声纹注册 / 管理", showBack = true, onBack = onBack, onTab = onTab) {
-        InfoCard {
-            Column(modifier = Modifier.fillMaxWidth().padding(16.dp), horizontalAlignment = Alignment.CenterHorizontally) {
-                Text("机主声纹模板 · owner.spk", style = MaterialTheme.typography.bodyMedium, fontWeight = FontWeight.Bold)
-                Text("取自训练集机主本人样本，不额外录音、不采他人", style = MaterialTheme.typography.labelSmall, color = Muted)
-                Spacer(Modifier.height(12.dp))
-                Row(modifier = Modifier.fillMaxWidth()) {
-                    Text("注册样本 642 / 600", style = MaterialTheme.typography.labelSmall, color = Muted)
+        // 模板状态卡：仅由 hasTemplate 驱动，不再展示任何虚构样本数
+        SectionCard(icon = Icons.Filled.Fingerprint, title = "机主声纹模板") {
+            Column(modifier = Modifier.fillMaxWidth(), horizontalAlignment = Alignment.CenterHorizontally) {
+                IconCircle(
+                    icon = Icons.Filled.Fingerprint,
+                    tint = if (hasTemplate) Brand else Muted,
+                    container = if (hasTemplate) BrandSoft else MaterialTheme.colorScheme.surfaceVariant,
+                    size = 56.dp,
+                )
+                Spacer(Modifier.height(Spacing.sm))
+                Text(
+                    "取自训练集机主本人样本，不额外录音、不采他人",
+                    style = MaterialTheme.typography.labelSmall,
+                    color = Muted,
+                )
+                Spacer(Modifier.height(Spacing.md))
+                Row(modifier = Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+                    Text("模板状态", style = MaterialTheme.typography.bodySmall)
                     Spacer(Modifier.weight(1f))
-                    PillChip(if (hasTemplate) "已完成" else "未注册")
+                    StatusBadge(
+                        text = if (hasTemplate) "已注册" else "未注册",
+                        tone = if (hasTemplate) Tone.OK else Tone.WARN,
+                    )
                 }
                 LinearProgressIndicator(
                     progress = { if (hasTemplate) 1f else 0f },
-                    modifier = Modifier.fillMaxWidth().padding(top = 8.dp),
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(top = Spacing.sm),
                     color = Brand,
                 )
             }
         }
 
-        SectionTitle("三环境子质心")
-        InfoCard {
-            Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceEvenly) {
-                EnvCard("安静", "已就绪")
-                EnvCard("外放", "已就绪")
-                EnvCard("远场", "已就绪")
-            }
+        SectionTitle("环境子质心（未标定）")
+        Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(Spacing.sm)) {
+            EnvCard("安静")
+            EnvCard("外放")
+            EnvCard("远场")
         }
 
-        SectionTitle("自测指标（示意）")
-        InfoCard {
-            Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceEvenly) {
-                MetricCard("98.6%", "本人接受率")
-                MetricCard("0.4%", "他人冒认率")
-            }
-            Spacer(Modifier.height(10.dp))
-            Button(
-                onClick = { vm.selfTest() },
-                modifier = Modifier.fillMaxWidth(),
-                colors = ButtonDefaults.buttonColors(containerColor = BrandSoft, contentColor = Brand),
-            ) { Text("开始自测") }
-        }
-
-        InfoCard {
-            Text(
-                "模板仅存本机并加密，不上传；可一键删除退回非声纹路径。",
-                style = MaterialTheme.typography.labelSmall,
-                color = Muted,
+        SectionTitle("自测指标（需真机真人标定）")
+        Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(Spacing.sm)) {
+            MetricCard(
+                value = "待自测",
+                label = "本人接受率",
+                tone = Tone.NEUTRAL,
+                modifier = Modifier.weight(1f),
+            )
+            MetricCard(
+                value = "待自测",
+                label = "他人冒认率",
+                tone = Tone.NEUTRAL,
+                modifier = Modifier.weight(1f),
             )
         }
+        Spacer(Modifier.height(Spacing.sm))
+        SecondaryButton(text = "开始自测", onClick = { vm.selfTest() })
 
+        Spacer(Modifier.height(Spacing.md))
+        InfoCardSimple("模板仅存本机并加密，不上传；可一键删除退回非声纹路径。")
+
+        Spacer(Modifier.height(Spacing.sm))
         Row(modifier = Modifier.fillMaxWidth()) {
-            Button(onClick = { vm.enroll() }, modifier = Modifier.weight(1f)) { Text("重新注册") }
-            Spacer(Modifier.padding(8.dp))
-            Button(
-                onClick = { showDeleteDialog = true },
-                modifier = Modifier.weight(1f),
-                colors = ButtonDefaults.buttonColors(containerColor = DangerBg, contentColor = Danger),
-            ) { Text("删除模板") }
+            SecondaryButton(
+                text = "重新注册",
+                onClick = { vm.enroll() },
+            )
         }
+        Spacer(Modifier.height(Spacing.sm))
+        DangerButton(text = "删除模板", onClick = { showDeleteDialog = true })
 
-        Spacer(Modifier.height(12.dp))
-        InfoCard {
-            ToggleRow("临时放行", "连续 3 次声纹拒绝时提示开启", false) { vm.setTempAllow(it) }
+        Spacer(Modifier.height(Spacing.md))
+        InfoCardSimple("临时放行：连续 3 次声纹拒绝时提示开启，开启后他人语音也可能触发执行。")
+        ToggleRow("临时放行", "当前为演示开关，状态由本机配置管理", false) { vm.setTempAllow(it) }
+
+        if (!hasTemplate) {
+            WarningCard("声纹模板不存在，当前自动降级为非声纹路径，他人语音也可能触发执行，请自行承担误触风险。")
         }
-        if (!hasTemplate) WarningCard("声纹模板不存在，当前自动降级为非声纹路径，他人语音也可能触发执行，请自行承担误触风险。")
-        if (message != null) WarningCard(message ?: "")
+        // 只展示非示意消息；自测的示意数值不进 UI，避免伪造指标
+        message?.let { raw ->
+            val shown = if (raw.contains("示意") || raw.contains("%")) {
+                "自测已启动：真实接受率 / 冒认率需在真机真人标定后填写，当前无实测数据。"
+            } else {
+                raw
+            }
+            WarningCard(shown)
+        }
 
         if (showDeleteDialog) {
             ConfirmDialog(
@@ -129,18 +156,30 @@ fun VoiceprintScreen(
 }
 
 @Composable
-private fun EnvCard(title: String, status: String) {
-    Column(horizontalAlignment = Alignment.CenterHorizontally) {
-        PillChip(title, BrandSoft, Brand)
-        Spacer(Modifier.height(6.dp))
-        Text(status, style = MaterialTheme.typography.labelSmall, color = Ok)
+private fun RowScope.EnvCard(title: String) {
+    Column(
+        modifier = Modifier.weight(1f),
+        horizontalAlignment = Alignment.CenterHorizontally,
+    ) {
+        StatusBadge(text = title, tone = Tone.BRAND)
+        Spacer(Modifier.height(Spacing.xs))
+        Text("未标定", style = MaterialTheme.typography.labelSmall, color = Muted)
     }
 }
 
 @Composable
-private fun MetricCard(value: String, label: String) {
-    Column(horizontalAlignment = Alignment.CenterHorizontally) {
-        Text(value, style = MaterialTheme.typography.displayMedium, color = Brand)
-        Text(label, style = MaterialTheme.typography.labelSmall, color = Muted)
+private fun InfoCardSimple(text: String) {
+    androidx.compose.material3.Surface(
+        shape = com.example.voicectl.ui.theme.CardShape,
+        color = MaterialTheme.colorScheme.surface,
+        border = androidx.compose.foundation.BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant),
+        modifier = Modifier.fillMaxWidth(),
+    ) {
+        Text(
+            text,
+            modifier = Modifier.padding(Spacing.md),
+            style = MaterialTheme.typography.labelSmall,
+            color = Muted,
+        )
     }
 }
