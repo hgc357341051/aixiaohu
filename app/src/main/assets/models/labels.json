@@ -1,0 +1,21 @@
+{
+  "wake": [
+    "WK_WAKE_NIHAO_XIAOHU",
+    "WK_WAKE_XIAOHU_XIAOHU",
+    "WK_NEG_SILENCE",
+    "WK_NEG_GAME_AUDIO",
+    "WK_NEG_HUMAN_SPEECH",
+    "WK_NEG_HARD_NEAR"
+  ],
+  "command": [
+    "换名刀", "换复活甲", "换辉月", "换吸血书", "换吸血刀", "换冰甲", "换血魔",
+    "换1号位", "换2号位", "换3号位", "换4号位", "换5号位", "换6号位",
+    "切换位置", "CMD_OTHER_UNKNOWN"
+  ],
+  "action": ["A0_SWAP", "A1_SWITCH", "A2_NONE"],
+  "object": [
+    "E0_MINGDAO", "E1_FUHUO", "E2_HUIYUE", "E3_XIXUE_SHU", "E4_XIXUE_DAO",
+    "E5_BINGJIA", "E6_XUEMO", "P0", "P1", "P2", "P3", "P4", "P5", "P6_POSITION", "OTHER"
+  ],
+  "control": ["C0_NONE", "C1_EXIT_WAKE", "C2_EXIT_RECOG", "C3_PAUSE", "C4_RESUME"]
+}

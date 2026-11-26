@@ -1,0 +1,8 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">小胡语音控制</string>
+    <string name="a11y_label">小胡执行服务</string>
+    <string name="a11y_description">仅用于在你主动触发后执行换装点击序列。不读取屏幕文字内容、不注入、不 Hook。可随时在系统设置中关闭。</string>
+    <string name="notification_channel_name">小胡语音控制</string>
+    <string name="notification_channel_description">常驻唤醒状态与暂停、退出快捷操作</string>
+</resources>
