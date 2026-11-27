@@ -149,7 +149,7 @@ fun PermissionsScreen(
         Spacer(Modifier.height(Spacing.sm))
         SecondaryButton(text = "仅手动模式进入", onClick = onManualOnly)
         Spacer(Modifier.height(Spacing.md))
-        WarningCard("拒绝麦克风后自动进入手动模式；拒绝无障碍后只走 Shizuku / 只读提示链路，不影响面板直选。")
+        WarningCard("拒绝麦克风后自动进入手动模式；拒绝无障碍后只走内嵌 ADB / 只读提示链路，不影响面板直选。")
     }
 }
 

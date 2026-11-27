@@ -29,12 +29,9 @@ import com.example.voicectl.machine.VoiceStateMachine
 import com.example.voicectl.monitor.Telemetry
 import com.example.voicectl.service.VoiceAccessibilityService
 import com.example.voicectl.service.VoiceForegroundService
-import com.example.voicectl.shizuku.InputBridge
-import com.example.voicectl.shizuku.InputBridgeImpl
-import com.example.voicectl.shizuku.ShizukuClient
-import com.example.voicectl.shizuku.ShizukuClientImpl
-import com.example.voicectl.shizuku.ShizukuInputExecutor
-import com.example.voicectl.shizuku.ShizukuPhase
+import com.example.voicectl.adb.AdbClient
+import com.example.voicectl.adb.AdbInputExecutor
+import com.example.voicectl.adb.AdbPhase
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
@@ -71,19 +68,18 @@ class AppContainer(private val context: Context) {
     val isDemoMode: Boolean get() = inferenceFactory is DemoInferenceFactory
     val modelVersion: String get() = if (isDemoMode) "demo-1.0.0" else tfliteFactory.modelVersion
 
-    /** Shizuku 客户端与 shell 进程输入桥：唯一的备用执行链路 */
-    val shizukuClient: ShizukuClient = ShizukuClientImpl(context.applicationContext, settingsStore)
-    val shizukuBridge: InputBridge = InputBridgeImpl(context.applicationContext, shizukuClient)
+    /** 内嵌 ADB 客户端与强类型输入桥：唯一的备用执行链路，不依赖外部应用 */
+    val adbClient: AdbClient = AdbClient(context.applicationContext, ::screenSize)
 
-    private val shizukuExecutor = ShizukuInputExecutor(
-        client = shizukuClient,
-        bridgeProvider = { shizukuBridge },
+    private val adbExecutor = AdbInputExecutor(
+        client = adbClient,
         mapper = coordinateMapper,
         screenSizeProvider = ::screenSize,
+        isAvailableProvider = { adbClient.status.value.phase == AdbPhase.CONNECTED },
     )
     private val executors: List<Executor> = listOf(
         AccessibilityExecutor { VoiceAccessibilityService.instance },
-        shizukuExecutor,
+        adbExecutor,
         ReadOnlyExecutor,
     )
     val executorChain = ExecutorChain(executors)
@@ -119,17 +115,14 @@ class AppContainer(private val context: Context) {
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
 
     fun initialize() {
-        // 语音主链路优先启动，绝不放在 Shizuku 的 try 块内
+        // 语音主链路优先启动，绝不放在可选执行链的初始化中
         recognitionPipeline.start(scope)
         scope.launch {
             settingsStore.configFlow.collect { updateConfig(it) }
         }
         scope.launch {
-            shizukuClient.status.collect { updateRuntimeMetrics() }
+            adbClient.status.collect { updateRuntimeMetrics() }
         }
-        // Shizuku 是可选备用链路：任何异常只记事件，不允许拖垮 Application.onCreate
-        runCatching { shizukuClient.start() }
-            .onFailure { telemetry.event("shizuku", "start_failed") }
     }
 
     private fun updateConfig(next: AppConfig) {
@@ -191,7 +184,7 @@ class AppContainer(private val context: Context) {
     private fun publishMetrics(snapshot: VoiceMetrics) {
         _metrics.value = snapshot.copy(
             modelVersion = modelVersion,
-            shizukuReady = shizukuClient.status.value.phase == ShizukuPhase.AUTHORIZED,
+            adbConnected = adbClient.status.value.phase == AdbPhase.CONNECTED,
         )
     }
 
@@ -199,7 +192,7 @@ class AppContainer(private val context: Context) {
         _metrics.value = _metrics.value.copy(
             audioCapturing = audioCapture.isCapturing,
             modelVersion = modelVersion,
-            shizukuReady = shizukuClient.status.value.phase == ShizukuPhase.AUTHORIZED,
+            adbConnected = adbClient.status.value.phase == AdbPhase.CONNECTED,
         )
     }
 
@@ -219,8 +212,7 @@ class AppContainer(private val context: Context) {
     )
 
     fun close() {
-        shizukuBridge.close()
-        shizukuClient.close()
+        adbClient.close()
         recognitionPipeline.stop()
         audioCapture.close()
         stateMachine.close()

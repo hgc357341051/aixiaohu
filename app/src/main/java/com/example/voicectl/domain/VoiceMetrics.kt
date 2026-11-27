@@ -14,5 +14,5 @@ data class VoiceMetrics(
     val lastUpdateMs: Long = 0L,
     val audioCapturing: Boolean = false,
     val modelVersion: String = "demo-1.0.0",
-    val shizukuReady: Boolean = false,
+    val adbConnected: Boolean = false,
 )

@@ -49,7 +49,6 @@ android {
     buildFeatures {
         compose = true
         buildConfig = true
-        aidl = true
     }
 
     compileOptions {
@@ -59,7 +58,13 @@ android {
 
     packaging {
         resources {
-            excludes += setOf("META-INF/DEPENDENCIES", "META-INF/LICENSE", "META-INF/LICENSE.txt", "META-INF/NOTICE")
+            excludes += setOf(
+                "META-INF/DEPENDENCIES",
+                "META-INF/LICENSE",
+                "META-INF/LICENSE.txt",
+                "META-INF/NOTICE",
+                "META-INF/versions/9/OSGI-INF/MANIFEST.MF",
+            )
         }
     }
 }
@@ -84,8 +89,7 @@ dependencies {
     implementation(libs.kotlinx.coroutines.android)
     implementation(libs.tensorflow.lite)
     implementation(libs.tensorflow.lite.gpu)
-    implementation(libs.shizuku.api)
-    implementation(libs.shizuku.provider)
+    implementation(libs.kadb)
 
     testImplementation(libs.junit)
     testImplementation(libs.kotlinx.coroutines.test)

@@ -1,29 +1,29 @@
 # 小胡 · 语音控制（Android 自用测试版）
 
-端侧语音控制原型工程：两级唤醒 + 单人声纹门控 + 控制词 C0–C4 + 14 类换装指令 + 无障碍/Shizuku 双执行链路。
+端侧语音控制原型工程：两级唤醒 + 单人声纹门控 + 控制词 C0–C4 + 14 类换装指令 + 无障碍/内嵌 ADB 双执行链路。
 **仅限自有设备与测试账号、学习研究使用，不发布市场、不牟利，风险自担。**
 
 ## 功能说明
 
-- **15 个页面/状态**：引导、权限、主页 7 态、设置、声纹、手动面板、ADB、指令映射、调试页（dev flavor），底部 TabBar 与通知栏覆盖层、C1 退出确认、声纹删除确认。
+- **15 个页面/状态**：引导、权限、主页 7 态、设置、声纹、手动面板、无线 ADB 连接、指令映射、调试页（dev flavor），底部 TabBar 与通知栏覆盖层、C1 退出确认、声纹删除确认。
 - **可插拔推理**：`InferenceFactory` 统一产出唤醒/指令/控制头/声纹四个引擎；`Demo*` 实现内置可运行，`Tflite*` 实现读取 `assets/models/` 模型，缺文件自动降级 Demo，业务代码零改动。
 - **delegate 降级**：AUTO/GPU/NNAPI/CPU，TFLite 侧按 GPU → NNAPI → CPU 逐档 try/catch 降级，设置页可手动切换，调试页显示实际生效档位。
 - **状态机 C1–C4**：C1 真退出（卸载模型 + 停麦克风 + 仅手动恢复 + 首次二次确认）；C2 退出识别保留唤醒；C3 暂停 30s 自动恢复；C4 恢复。
-- **执行层**：无障碍手势为主、Shizuku UserService + AIDL 强类型输入为备、最后只读提示；禁止注入/Hook/读内存。坐标按 1080×2340 基准换算。
-- **持久化**：Preferences DataStore 保存开关、模式、灵敏度、delegate、声纹开关、反馈与 Shizuku 曾授权标记。
+- **执行层**：无障碍手势为主、内嵌 ADB 强类型输入为备、最后只读提示；禁止注入/Hook/读内存。坐标按 1080×2340 基准换算。
+- **持久化**：Preferences DataStore 保存开关、模式、灵敏度、delegate、声纹开关与反馈；ADB 主机私钥保存在应用私有目录。
 - **安全**：C1 后无常驻拾音；`MANUAL_SILENT` 只认 `ManualResume` / `ExitGame`；埋点只记录事件名与模式维度，不记录音频或声纹向量。
 
 ## 构建方式
 
-环境：JDK 17 + Android SDK 35 + Gradle Wrapper 8.7（AGP 8.5.2 / Kotlin 2.0.20 / Compose Compiler 2.0.20）。
+环境：JDK 17 + Android SDK 35 + Gradle Wrapper 8.7（AGP 8.5.2 / Kotlin 2.4.20 / Compose Compiler 2.4.20）。
 
 ```bash
 ./gradlew :app:assembleDevDebug      # 生成 app/build/outputs/apk/dev/debug/app-dev-debug.apk
-./gradlew :app:testDevDebugUnitTest  # JVM 单测：状态机 / 坐标 / 词表
+./gradlew :app:testDevDebugUnitTest  # JVM 单测：状态机 / 坐标 / 词表 / ADB 命令边界
 ```
 
 flavor：`dev`（调试页可见）、`gray`、`release`（均隐藏调试页）。
-CI：任意分支 push 触发 `.github/workflows/build.yml`，上传带 commit sha 的 devDebug APK。
+CI：任意分支 push 触发 `.github/workflows/build.yml`，上传带 commit sha 的 devDebug APK，并发布 prerelease Release。
 
 ## 模型替换说明
 
@@ -33,23 +33,22 @@ CI：任意分支 push 触发 `.github/workflows/build.yml`，上传带 commit s
 4. `owner.spk` 默认格式：`int32 count + int32 dim + count*dim 个 float32`（后续可替换为加密容器）。模板缺失自动走非声纹路径。
 5. 若模型加载失败（文件缺失/不兼容/delegate 异常），自动回落到 Demo 引擎，不会崩溃。
 
-## Shizuku 输入链路
+## 内嵌 ADB 输入链路
 
-App 通过 Shizuku `bindUserService()` 绑定运行在 shell 身份进程中的本 App `UserService`，
-再经自定义 AIDL 强类型方法下发输入命令。无线调试（Android 14+）只是 Shizuku 的启动方式，
-客户端始终只有这一套 Binder + 授权 + UserService，不存在第二套协议。
+应用使用 `com.flyfishxu:kadb:1.3.0` 直接实现 ADB 客户端协议，**不依赖任何外部辅助应用，也不依赖 PC 上的 adb**。
 
-| AIDL 方法 | 参数（全部 int） | 说明 |
+1. 在目标设备开启「开发者选项 → 无线调试」。
+2. 通过「使用配对码配对设备」取得配对端口与 6 位配对码，在本应用「设置 → 无线 ADB 连接」中发起配对。
+3. 在无线调试主页读取连接端口，填入后连接。连接时使用一次 `echo` 验证 shell 可用。
+4. 应用把 ADB 证书与主机私钥持久化在 `filesDir/adb_host_cert.der` 和 `filesDir/adb_host_key.der`，配对成功后跨重启仍可重连；配对码本身不保存。
+
+| 强类型命令 | 下发模板 | 约束 |
 |---|---|---|
-| `tap` | `x, y` | 屏幕物理坐标点击 |
-| `swipe` | `x1, y1, x2, y2, durationMs` | 滑动，时长上限 10000ms |
-| `keyEvent` | `keyCode` | 仅 HOME(3) / BACK(4) / ENTER(66) |
-| `probe` | — | 探测 `/system/bin/input` 是否可执行 |
+| `Tap(x, y)` | `input tap x y` | x/y 必须在真实屏幕范围内 |
+| `Swipe(..., durationMs)` | `input swipe x1 y1 x2 y2 durationMs` | 时长 0–10000ms |
+| `KeyEvent(keyCode)` | `input keyevent keyCode` | 仅 HOME(3) / BACK(4) / ENTER(66) |
 
-安全边界：无字符串命令入口；坐标、时长、keyCode 在 App 进程与 shell 进程双重校验；
-shell 进程只调用 `/system/bin/input` 的固定子命令，不使用 `sh -c`，不读 `/data/data`，
-不 Hook、不注入代码、不反射隐藏 API。状态分六态（未安装 / 服务未运行 / 未授权 /
-已授权 / 授权失效 / 不支持），执行前重查授权，失效即中止剩余步骤并引导重新授权。
+安全边界：没有字符串命令入口；命令动词由固定模板决定，参数均为校验后的整数；不提供 `sh -c`、不 Hook、不注入代码、不反射隐藏 API、不读取设备私有数据。执行器一旦真正派发过点击，失败时标记 `attempted=true`，执行链停止降级重放，避免重复点击。
 
 ## 安全与合规声明
 

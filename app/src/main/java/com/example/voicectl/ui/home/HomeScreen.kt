@@ -114,8 +114,8 @@ fun HomeScreen(
                 tone = if (uiState.isDemo) Tone.WARN else Tone.BRAND,
             )
             StatusBadge(
-                text = if (uiState.metrics.shizukuReady) "Shizuku 已授权" else "Shizuku 未授权",
-                tone = if (uiState.metrics.shizukuReady) Tone.OK else Tone.NEUTRAL,
+                text = if (uiState.metrics.adbConnected) "ADB 已连接" else "ADB 未连接",
+                tone = if (uiState.metrics.adbConnected) Tone.OK else Tone.NEUTRAL,
             )
         }
 
