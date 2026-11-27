@@ -20,12 +20,14 @@ import com.aixiaohuadb.App
 import com.aixiaohuadb.adb.AdbClient
 import com.aixiaohuadb.adb.AdbPhase
 import com.aixiaohuadb.adb.AdbTouchRecorder
+import com.aixiaohuadb.domain.macro.MacroAdapter
+import com.aixiaohuadb.domain.macro.MacroStep
 import com.aixiaohuadb.exec.DisplaySize
 import com.aixiaohuadb.exec.ExecStep
 import com.aixiaohuadb.inference.api.ControlWord
 import com.aixiaohuadb.machine.VoiceEvent
 import com.aixiaohuadb.machine.VoiceState
-import com.aixiaohuadb.ui.SnapshotCaptureActivity
+import com.aixiaohuadb.service.recorder.AccessibilityRecorder
 import com.aixiaohuadb.ui.MainActivity
 import com.aixiaohuadb.voice.VoiceAction
 import kotlinx.coroutines.CoroutineScope
@@ -58,11 +60,9 @@ class OverlayControlService : Service() {
     private var panelParams: WindowManager.LayoutParams? = null
     /** 每次移除/重建面板自增，阻止旧 View.post 回调更新新面板或已移除的 View */
     private var panelGeneration = 0
-    private var recordBarView: View? = null
-    private var recordBarParams: WindowManager.LayoutParams? = null
+    private var accessibilityRecorder: AccessibilityRecorder? = null
     private var adbChipView: View? = null
     private var adbChipParams: WindowManager.LayoutParams? = null
-    private var recording = false
     private var adbRecorder: AdbTouchRecorder? = null
     private var adbRecording = false
 
@@ -120,15 +120,6 @@ class OverlayControlService : Service() {
                 if (modeChanged && panelOpen) buildPanel()
             }
         }
-        // 标注页把步骤写回 pendingMacro 后，底部录制条要立刻更新计数并启用「完成」，
-        // 否则用户标注完仍看到 0 步、完成按钮不可点。
-        serviceScope?.launch {
-            OverlayStore.pendingMacro.collect { macro ->
-                recordBarView?.let { bar ->
-                    OverlayViews.updateRecordBar(bar, macro?.steps?.size ?: 0, false)
-                }
-            }
-        }
         // 前台兜底轮询：无障碍事件直达为主通道，500ms 轮询保证无障碍未开启时也能切换
         serviceScope?.launch {
             while (isActive) {
@@ -140,6 +131,7 @@ class OverlayControlService : Service() {
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
         when (intent?.action) {
+            ACTION_START_RECORD -> startRecording()
             MacroRecordNotification.ACTION_FINISH_RECORD -> finishAdbRecording()
             MacroRecordNotification.ACTION_CANCEL_RECORD -> cancelAdbRecording()
         }
@@ -148,6 +140,8 @@ class OverlayControlService : Service() {
 
     override fun onDestroy() {
         recordingSession++
+        accessibilityRecorder?.destroy()
+        accessibilityRecorder = null
         runCatching { adbRecorder?.stop() }
         adbRecorder = null
         adbRecording = false
@@ -158,13 +152,12 @@ class OverlayControlService : Service() {
         listOfNotNull(ballPair?.first).forEach { runCatching { windowManager.removeView(it) } }
         buttonViews.values.forEach { (v, _) -> runCatching { windowManager.removeView(v) } }
         buttonViews.clear()
-        listOfNotNull(panelHolder?.root, namingView, recordBarView, adbChipView, confirmView).forEach {
+        listOfNotNull(panelHolder?.root, namingView, adbChipView, confirmView).forEach {
             runCatching { windowManager.removeView(it) }
         }
         ballPair = null
         panelHolder = null
         namingView = null
-        recordBarView = null
         adbChipView = null
         confirmView = null
         super.onDestroy()
@@ -175,9 +168,11 @@ class OverlayControlService : Service() {
     // ---------------- 统一渲染 ----------------
 
     private fun reconcile() {
-        // 悬浮球：全局显示
-        if (ballCfg.visible && ballPair == null) addBall()
-        if (!ballCfg.visible && ballPair != null) removeBall()
+        // 自家 App 在前台时，悬浮球/按钮必须全部隐藏：
+        // 否则会压住 App 内的编辑器输入框和步骤行，点击也会被悬浮窗拦截。
+        val selfForeground = ForegroundGameMonitor.lastForegroundPackage == packageName
+        if (ballCfg.visible && !selfForeground && ballPair == null) addBall()
+        if ((!ballCfg.visible || selfForeground) && ballPair != null) removeBall()
         ballPair?.let { (view, params) ->
             OverlayViews.applyBallStyle(this, view, params, ballCfg, controlMode, voiceEnabled)
             val (screenW, screenH) = screenSize()
@@ -189,9 +184,13 @@ class OverlayControlService : Service() {
             runCatching { windowManager.updateViewLayout(view, params) }
         }
 
-        // 按钮常驻：关闭面板、非游戏前台时不消失（参考自动连招工具的快捷键行为）
-        val shown = if (keepButtonsWhenPanelClosed) widgets.filter { it.enabled } else
-            if (gameVisible || panelOpen) widgets.filter { it.enabled } else emptyList()
+        // 按钮常驻游戏内，但自家 App 前台时必须隐藏，避免遮挡编辑器和吞掉点击。
+        val shown = when {
+            selfForeground -> emptyList()
+            keepButtonsWhenPanelClosed -> widgets.filter { it.enabled }
+            gameVisible || panelOpen -> widgets.filter { it.enabled }
+            else -> emptyList()
+        }
         buttonViews.keys.toList().forEach { id ->
             val cfg = shown.firstOrNull { it.id == id }
             if (cfg == null) removeButton(id) else updateButton(cfg)
@@ -658,18 +657,69 @@ class OverlayControlService : Service() {
     // ---------------- 录制宏 ----------------
 
     /**
-     * 首选 ADB 被动监听：不添加任何可触摸覆盖层，游戏收到原始点击，我们只读内核事件。
-     * ADB 不可用或 getevent 失败时回落到底部录制条 + 截图标注方案，并明确告知原因。
+     * 默认录制：无障碍覆盖层接管触摸，抬手时把同一手势转发给游戏。
+     *
+     * 不再以 ADB getevent 为主路径：被动监听要求 Type B（ABS_MT_SLOT/TRACKING_ID），
+     * 大量模拟器与旧设备是 Type A，只会得到"被动录制不可用"，而截图标注并不能算录制。
+     * 这条路径不关心触摸协议，也不依赖 ADB 连接。
      */
     private fun startRecording() {
+        // 上一次录制若停在异常状态（窗口被系统移除但对象还在），先彻底清理再重建，
+        // 否则入口会变成"点了没反应"。
+        accessibilityRecorder?.let { old ->
+            runCatching { old.cancel() }
+            runCatching { old.destroy() }
+        }
+        accessibilityRecorder = null
+        closePanel()
+        val recorder = AccessibilityRecorder(this, object : AccessibilityRecorder.Listener {
+            override fun onStep(step: MacroStep) = Unit
+            override fun onTick(elapsedMs: Long, stepCount: Int) = Unit
+            override fun onFinishRequested() = finishAccessibilityRecording()
+            override fun onCancelRequested() = cancelAccessibilityRecording()
+            override fun onError(message: String) {
+                Toast.makeText(this@OverlayControlService, message, Toast.LENGTH_LONG).show()
+            }
+        })
+        if (!recorder.start()) {
+            recorder.destroy()
+            return
+        }
+        accessibilityRecorder = recorder
+        OverlayStore.discardPendingMacro()
+    }
+
+    private fun finishAccessibilityRecording() {
+        val recorder = accessibilityRecorder ?: return
+        accessibilityRecorder = null
+        val steps = recorder.stop()
+        recorder.destroy()
+        Log.d("OverlayControl", "finishRecording steps=${steps.size}")
+        if (steps.isEmpty()) {
+            OverlayStore.discardPendingMacro()
+            Toast.makeText(this, "没有录到操作，请重试", Toast.LENGTH_SHORT).show()
+            return
+        }
+        OverlayStore.stagePendingMacro(MacroAdapter.toExecSteps(steps))
+        showNamingWindow()
+    }
+
+    private fun cancelAccessibilityRecording() {
+        val recorder = accessibilityRecorder ?: return
+        accessibilityRecorder = null
+        recorder.cancel()
+        recorder.destroy()
+        OverlayStore.discardPendingMacro()
+    }
+
+    /**
+     * ADB 增强录制：getevent 被动监听，保留内核时间戳与原生多指。
+     * 仅在设备支持 Type B 且用户明确选择时使用；失败只提示，不再伪装成"改用截图标注"。
+     */
+    private fun startAdbRecording() {
         val client: AdbClient = (application as App).container.adbClient
         if (client.status.value.phase != AdbPhase.CONNECTED) {
-            Toast.makeText(
-                this,
-                "未连接 ADB：无法读取真实触摸，改为手动截屏标注坐标（不是录制）",
-                Toast.LENGTH_LONG,
-            ).show()
-            startSnapshotCapture()
+            Toast.makeText(this, "未连接 ADB，无法使用高保真录制", Toast.LENGTH_SHORT).show()
             return
         }
         if (adbRecording) return
@@ -678,8 +728,7 @@ class OverlayControlService : Service() {
         val session = ++recordingSession
         recordError = ""
         val recorder = AdbTouchRecorder(client, scope)
-        // 读循环可能在 start() 返回前极早失败（getevent 权限不足的典型场景）：
-        // 该标志确保"安装 recorder"与"回落"互斥，避免把已死的 recorder 装进录制态。
+        // 读循环可能在 start() 返回前极早失败：该标志确保"安装 recorder"与"提示"互斥。
         val errorSignalled = AtomicBoolean(false)
         scope.launch(Dispatchers.IO) {
             val started = try {
@@ -701,7 +750,6 @@ class OverlayControlService : Service() {
                     return@withContext
                 }
                 if (errorSignalled.get()) {
-                    // 早失败时 onError 的 Main 块因 recorder 未安装而 no-op，这里负责收尾
                     runCatching { recorder.stop() }
                     return@withContext
                 }
@@ -709,20 +757,17 @@ class OverlayControlService : Service() {
                 adbRecording = true
                 OverlayStore.discardPendingMacro()
                 showAdbChip()
-                // 通知是可选入口：被用户关闭时屏幕胶囊仍能完成/取消
                 if (NotificationManagerCompat.from(this@OverlayControlService).areNotificationsEnabled()) {
                     MacroRecordNotification.show(this@OverlayControlService, 0)
                 }
             }
             if (!started || errorSignalled.get()) {
                 withContext(Dispatchers.Main.immediate) {
-                    val reason = recordError.ifBlank { "getevent 不可用" }
                     Toast.makeText(
                         this@OverlayControlService,
-                        "被动录制不可用：$reason；改为手动截屏标注",
+                        "ADB 高保真录制不可用：${recordError.ifBlank { "getevent 未返回事件" }}",
                         Toast.LENGTH_LONG,
                     ).show()
-                    startSnapshotCapture()
                 }
             }
         }
@@ -738,7 +783,7 @@ class OverlayControlService : Service() {
     }
 
     private fun onRecordError(recorder: AdbTouchRecorder) {
-        // A synchronous start failure has adbRecorder==null; the !started branch above owns fallback then.
+        // 同步启动失败时 adbRecorder==null，由 startAdbRecording 的 !started 分支负责提示。
         if (!adbRecording || adbRecorder !== recorder) return
         runCatching { adbRecorder?.stop() }
         adbRecorder = null
@@ -747,10 +792,9 @@ class OverlayControlService : Service() {
         hideAdbChip()
         Toast.makeText(
             this,
-            "被动录制中断：${recordError.ifBlank { "getevent 结束" }}；改为手动截屏标注",
+            "ADB 高保真录制中断：${recordError.ifBlank { "getevent 结束" }}",
             Toast.LENGTH_LONG,
         ).show()
-        startSnapshotCapture()
     }
 
     private fun finishAdbRecording() {
@@ -805,81 +849,6 @@ class OverlayControlService : Service() {
         adbChipView?.let { runCatching { windowManager.removeView(it) } }
         adbChipView = null
         adbChipParams = null
-    }
-
-    /**
-     * 回落方案：游戏内只保留底部 64dp 录制条；顶部 25% 零覆盖，录制条以外区域全部透传给游戏。
-     * 所有坐标点一律来自 MediaProjection 单帧截图 → 应用内 SnapshotAnnotationScreen 标注，
-     * 不存在任何覆盖游戏区域、消费触摸的拾取层。
-     */
-    private fun startSnapshotCapture() {
-        if (recordBarView != null) return
-        closePanel()
-        recording = true
-        refreshPendingCount()
-        val (screenW, _) = screenSize()
-        val bar = OverlayViews.createRecordBar(this, OverlayViews.RecordBarCallbacks(
-            onToggleRecord = { SnapshotCaptureActivity.start(this) },
-            onUndo = {
-                OverlayStore.discardPendingMacro()
-                refreshPendingCount()
-            },
-            onFinish = {
-                if (OverlayStore.pendingMacro.value?.steps?.isNotEmpty() == true) {
-                    stopCapture()
-                    showNamingWindow()
-                } else {
-                    SnapshotCaptureActivity.start(this)
-                }
-            },
-            onCancel = { cancelRecording() },
-            onCollapsedChange = { collapsed ->
-                recordBarParams?.let { params ->
-                    params.width = if (collapsed) {
-                        dp(148f)
-                    } else {
-                        minOf(dp(380f), screenW - dp(24f)).coerceAtLeast(dp(200f))
-                    }
-                    params.height = dp(64f)
-                    recordBarView?.let { view ->
-                        runCatching { windowManager.updateViewLayout(view, params) }
-                    }
-                }
-            },
-        ))
-        val width = minOf(dp(380f), screenW - dp(24f)).coerceAtLeast(dp(200f))
-        recordBarParams = WindowManager.LayoutParams(
-            width, dp(64f),
-            WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY,
-            WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE,
-            PixelFormat.TRANSLUCENT,
-        ).apply {
-            // gravity=BOTTOM 时正的 y 会把条推出屏幕，必须用负偏移/底边距
-            gravity = Gravity.BOTTOM or Gravity.CENTER_HORIZONTAL
-            y = -dp(20f)
-        }
-        runCatching { windowManager.addView(bar, recordBarParams) }
-        recordBarView = bar
-        refreshPendingCount()
-    }
-
-    /** 标注页保存后回到游戏时，计数以 pendingMacro 为准 */
-    private fun refreshPendingCount() {
-        val count = OverlayStore.pendingMacro.value?.steps?.size ?: 0
-        recordBarView?.let { OverlayViews.updateRecordBar(it, count, false) }
-    }
-
-    private fun cancelRecording() {
-        recording = false
-        OverlayStore.discardPendingMacro()
-        stopCapture()
-    }
-
-    private fun stopCapture() {
-        recording = false
-        recordBarView?.let { runCatching { windowManager.removeView(it) } }
-        recordBarView = null
-        recordBarParams = null
     }
 
     /** 面板切语音模式：未开启时弹确认，enable 成功才真正切 mode */
@@ -980,10 +949,23 @@ class OverlayControlService : Service() {
             runCatching { context.startService(Intent(context, OverlayControlService::class.java)) }
         }
 
+        /** 从 App 内直接发起录制；服务会添加无障碍录制层，调用方负责把任务切到后台。 */
+        fun startRecording(context: Context) {
+            if (!Settings.canDrawOverlays(context)) {
+                Toast.makeText(context, "请先授予悬浮窗权限", Toast.LENGTH_SHORT).show()
+                return
+            }
+            val intent = Intent(context, OverlayControlService::class.java)
+                .setAction(ACTION_START_RECORD)
+            runCatching { context.startService(intent) }
+        }
+
         fun stop(context: Context) {
             runCatching { context.stopService(Intent(context, OverlayControlService::class.java)) }
         }
 
         fun isPermissionGranted(context: Context): Boolean = Settings.canDrawOverlays(context)
+
+        const val ACTION_START_RECORD = "com.aixiaohuadb.action.START_RECORD"
     }
 }

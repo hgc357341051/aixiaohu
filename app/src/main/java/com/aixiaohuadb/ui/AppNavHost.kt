@@ -1,5 +1,6 @@
 package com.aixiaohuadb.ui
 
+import android.app.Activity
 import android.content.Context
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Box
@@ -12,6 +13,7 @@ import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
@@ -34,8 +36,11 @@ import com.aixiaohuadb.ui.adb.AdbViewModel
 import com.aixiaohuadb.ui.debug.DebugScreen
 import com.aixiaohuadb.ui.debug.DebugViewModel
 import com.aixiaohuadb.ui.home.HomeScreen
-import com.aixiaohuadb.ui.macro.SnapshotAnnotationScreen
-import com.aixiaohuadb.ui.macro.SnapshotAnnotationViewModel
+import com.aixiaohuadb.domain.macro.MacroAdapter
+import com.aixiaohuadb.exec.CommandAction
+import com.aixiaohuadb.service.OverlayStore
+import com.aixiaohuadb.ui.macros.MacroEditorScreen
+import com.aixiaohuadb.ui.macros.MacrosScreen
 import com.aixiaohuadb.ui.mapping.MappingScreen
 import com.aixiaohuadb.ui.mapping.MappingViewModel
 import com.aixiaohuadb.ui.onboarding.OnboardingScreen
@@ -51,6 +56,7 @@ import com.aixiaohuadb.ui.theme.PillShape
 import com.aixiaohuadb.ui.voiceprint.VoiceprintScreen
 import com.aixiaohuadb.ui.voiceprint.VoiceprintViewModel
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.launch
 
 /** 单 Activity 导航图：10 个 destination + home/{state} 参数化承载机态 */
 @Composable
@@ -58,7 +64,6 @@ fun AppNavHost(
     vm: AppViewModel,
     container: AppContainer,
     context: Context,
-    snapshotUri: String? = null,
 ) {
     val nav = rememberNavController()
     val uiState by vm.ui.collectAsState()
@@ -67,9 +72,6 @@ fun AppNavHost(
     // 面板 / 映射 / 悬浮设置共用同一 ViewModel，避免 OverlayStore 多实例观察不一致。
     val overlayVm: OverlayControlViewModel = viewModel(
         factory = SimpleVmFactory { OverlayControlViewModel(container) },
-    )
-    val snapshotVm: SnapshotAnnotationViewModel = viewModel(
-        factory = SimpleVmFactory { SnapshotAnnotationViewModel() },
     )
 
     // 动态路由（home/{state}、snapshot_annotation）即使与目标图不一致也不能把 App 带崩：
@@ -88,15 +90,6 @@ fun AppNavHost(
         navigateSafe(target) {
             launchSingleTop = true
             popUpTo(target) { inclusive = true }
-        }
-    }
-
-    LaunchedEffect(snapshotUri) {
-        if (snapshotUri != null) {
-            navigateSafe("snapshot_annotation") {
-                launchSingleTop = true
-                popUpTo("onboarding") { inclusive = true }
-            }
         }
     }
 
@@ -154,6 +147,56 @@ fun AppNavHost(
                     onResume = vm::resume,
                 )
             }
+            composable("macros") {
+                val macros by overlayVm.macros.collectAsState()
+                MacrosScreen(
+                    macros = macros,
+                    onBack = { nav.popBackStack() },
+                    onTab = navigateTab,
+                    onRun = { macroId ->
+                        vm.runMacro(macroId)
+                        nav.navigate("home/executing") { launchSingleTop = true }
+                    },
+                    onEdit = { macroId -> nav.navigate("macro_editor/$macroId") },
+                    onDelete = { macroId -> OverlayStore.removeMacro(macroId) },
+                    onNew = {
+                        com.aixiaohuadb.service.OverlayControlService.startRecording(context)
+                        // 先让服务真正处理 START_RECORD（添加录制层），再切后台；
+                        // 立即 moveTaskToBack 会让 startService 落到后台限制里，被静默拒绝。
+                        android.os.Handler(android.os.Looper.getMainLooper()).postDelayed({
+                            (context as? Activity)?.moveTaskToBack(true)
+                        }, 600L)
+                    },
+                )
+            }
+            composable("macro_editor/{macroId}") { entry ->
+                val macros by overlayVm.macros.collectAsState()
+                val macroId = entry.arguments?.getString("macroId")?.toLongOrNull()
+                val target = macros.firstOrNull { it.macroId == macroId }
+                val testScope = rememberCoroutineScope()
+                MacroEditorScreen(
+                    macro = target,
+                    onBack = { nav.popBackStack() },
+                    onTab = navigateTab,
+                    onSave = { name, steps ->
+                        if (macroId != null) {
+                            OverlayStore.updateMacro(macroId, name, steps)
+                            nav.popBackStack()
+                        }
+                    },
+                    onTestStep = { step ->
+                        testScope.launch {
+                            container.executeManual(
+                                CommandAction(0, "单步测试", MacroAdapter.toExecSteps(listOf(step))),
+                            )
+                        }
+                    },
+                    onDelete = { id ->
+                        OverlayStore.removeMacro(id)
+                        nav.popBackStack()
+                    },
+                )
+            }
             composable("settings") {
                 SettingsScreen(
                     vm = viewModel(factory = SimpleVmFactory { SettingsViewModel(container) }),
@@ -188,7 +231,16 @@ fun AppNavHost(
                         vm.runMacro(macroId)
                         nav.navigate("home/executing") { launchSingleTop = true }
                     },
-                    onNewMacro = { SnapshotCaptureActivity.start(context) },
+                    onManageMacros = { nav.navigate("macros") },
+                    onNewMacro = {
+                        // 录制入口：拉起悬浮服务并回到游戏，由顶部胶囊控制录制。
+                        com.aixiaohuadb.service.OverlayControlService.startRecording(context)
+                        // 先让服务真正处理 START_RECORD（添加录制层），再切后台；
+                        // 立即 moveTaskToBack 会让 startService 落到后台限制里，被静默拒绝。
+                        android.os.Handler(android.os.Looper.getMainLooper()).postDelayed({
+                            (context as? Activity)?.moveTaskToBack(true)
+                        }, 600L)
+                    },
                 )
             }
             composable("adb") {
@@ -202,14 +254,6 @@ fun AppNavHost(
                 MappingScreen(
                     vm = viewModel(factory = SimpleVmFactory { MappingViewModel() }),
                     overlayVm = overlayVm,
-                    onBack = { nav.popBackStack() },
-                    onTab = navigateTab,
-                )
-            }
-            composable("snapshot_annotation") {
-                SnapshotAnnotationScreen(
-                    uri = snapshotUri,
-                    vm = snapshotVm,
                     onBack = { nav.popBackStack() },
                     onTab = navigateTab,
                 )

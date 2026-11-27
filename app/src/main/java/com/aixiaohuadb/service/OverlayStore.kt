@@ -215,6 +215,18 @@ object OverlayStore {
         return macroId
     }
 
+    /** 编辑器保存：覆盖已有宏的名称与步骤，不改变 id 与悬浮按钮位置。 */
+    fun updateMacro(macroId: Long, name: String, steps: List<ExecStep>) {
+        val safeName = OverlayCodec.sanitizeLabel(name)
+        val safeSteps = steps.take(MacroConfig.MAX_STEPS)
+        _macros.value = _macros.value.map {
+            if (it.macroId == macroId) it.copy(name = safeName, steps = safeSteps) else it
+        }
+        mutateWidgets { current ->
+            current.map { if (it.id == "macro:$macroId") it.copy(label = safeName) else it }
+        }
+    }
+
     fun removeMacro(macroId: Long) {
         _macros.value = _macros.value.filterNot { it.macroId == macroId }
         mutateWidgets { current -> current.filterNot { it.id == "macro:$macroId" } }

@@ -14,6 +14,7 @@ import androidx.compose.material.icons.filled.AddCircle
 import androidx.compose.material.icons.filled.VideogameAsset
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
@@ -39,6 +40,7 @@ fun PanelScreen(
     onTab: (String) -> Unit,
     onRunMacro: (Long) -> Unit,
     onNewMacro: () -> Unit,
+    onManageMacros: () -> Unit = {},
 ) {
     val macros by vm.macros.collectAsState()
     ScreenFrame(
@@ -59,6 +61,10 @@ fun PanelScreen(
         }
 
         SectionTitle("我的宏 · ${macros.size}")
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            TextButton(onClick = onManageMacros) { Text("管理 / 编辑宏") }
+            Spacer(Modifier.weight(1f))
+        }
         if (macros.isEmpty()) {
             SectionCard(icon = Icons.Filled.VideogameAsset, title = "还没有宏") {
                 Text(

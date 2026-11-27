@@ -37,12 +37,6 @@
         </activity>
 
         <activity
-            android:name=".ui.SnapshotCaptureActivity"
-            android:exported="false"
-            android:launchMode="singleTask"
-            android:theme="@style/Theme.VoiceCtl" />
-
-        <activity
             android:name=".adb.AdbStartActivity"
             android:exported="false"
             android:excludeFromRecents="true"

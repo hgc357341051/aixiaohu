@@ -19,6 +19,19 @@ class AdbTouchRecorderTest {
 
     private fun accumulator() = TouchAccumulator(screenWidth, screenHeight, maxX, maxY, CoordinateMapper())
 
+    /** Type A 老设备：没有 ABS_MT_SLOT，累积器按 SYN 帧内的坐标顺序配对触点。 */
+    private fun typeAAccumulator() = TouchAccumulator(
+        screenWidth, screenHeight, maxX, maxY, CoordinateMapper(),
+        Surface.ROTATION_0, "/dev/input/event2", TouchProtocol.A,
+    )
+
+    /** 直接喂 `getevent -lt` 的真实文本，顺带覆盖 parseGeteventLine 的解析链路。 */
+    private fun feed(acc: TouchAccumulator, output: String) {
+        output.lineSequence().forEach { line ->
+            parseGeteventLine(line)?.let { acc.accept(it) }
+        }
+    }
+
     private fun ev(timeMs: Long, name: String, value: Int, type: String = "EV_ABS") =
         ParsedEvent(timeMs, type, name, value)
 
@@ -295,5 +308,193 @@ class AdbTouchRecorderTest {
         assertEquals(listOf(ExecStep.Tap(720, 1_200)), acc.steps())
         assertNull(acc.finish())
         assertFalse(acc.steps().isEmpty())
+    }
+
+    // ---------------- Type A 协议 ----------------
+
+    private val typeADump = """
+        add device 1: /dev/input/event2
+          name:     "legacy_ts"
+          events:
+            ABS (0003): ABS_MT_POSITION_X     : value 0, min 0, max 1079, resolution 0
+                        ABS_MT_POSITION_Y     : value 0, min 0, max 2339, resolution 0
+                        ABS_MT_TOUCH_MAJOR    : value 0, min 0, max 31, resolution 0
+    """.trimIndent()
+
+    @Test
+    fun `缺 SLOT 的设备被识别为 Type A 且优先选择 Type B`() {
+        val output = """
+            add device 1: /dev/input/event2
+              name:     "legacy_ts"
+              events:
+                ABS (0003): ABS_MT_POSITION_X     : value 0, min 0, max 1079, resolution 0
+                            ABS_MT_POSITION_Y     : value 0, min 0, max 2339, resolution 0
+            add device 2: /dev/input/event5
+              name:     "goodix_ts"
+              events:
+                ABS (0003): ABS_MT_SLOT           : value 0, min 0, max 9, resolution 0
+                            ABS_MT_TRACKING_ID    : value 0, min 0, max 65535, resolution 0
+                            ABS_MT_POSITION_X     : value 0, min 0, max 1079, resolution 0
+                            ABS_MT_POSITION_Y     : value 0, min 0, max 2339, resolution 0
+        """.trimIndent()
+
+        val devices = parseGeteventDevices(output)
+        assertEquals(TouchProtocol.A, devices.single { it.path == "/dev/input/event2" }.protocol)
+        assertEquals(TouchProtocol.B, devices.single { it.path == "/dev/input/event5" }.protocol)
+        // Type A 也能录，但 Type B 的多指语义更可靠，优先选它
+        assertEquals("/dev/input/event5", pickTouchDevice(output, devices).path)
+
+        val typeAOnly = parseGeteventDevices(typeADump)
+        assertEquals(TouchProtocol.A, pickTouchDevice(typeADump, typeAOnly).protocol)
+        assertEquals("/dev/input/event2", pickTouchDevice(typeADump, typeAOnly).path)
+    }
+
+    @Test
+    fun `Type A 单指点击生成一个 Tap`() {
+        val acc = typeAAccumulator()
+        feed(
+            acc,
+            """
+            [  7000.100000] EV_ABS       ABS_MT_TRACKING_ID   00000000
+            [  7000.100000] EV_ABS       ABS_MT_POSITION_X    0000021c
+            [  7000.100000] EV_ABS       ABS_MT_POSITION_Y    00000492
+            [  7000.100000] EV_ABS       ABS_MT_TOUCH_MAJOR   00000005
+            [  7000.100000] EV_ABS       ABS_MT_PRESSURE      00000020
+            [  7000.100000] EV_KEY       BTN_TOUCH            DOWN
+            [  7000.100000] EV_SYN       SYN_REPORT           00000000
+            [  7000.200000] EV_ABS       ABS_MT_TOUCH_MAJOR   00000000
+            [  7000.200000] EV_ABS       ABS_MT_PRESSURE      00000000
+            [  7000.200000] EV_KEY       BTN_TOUCH            UP
+            [  7000.200000] EV_SYN       SYN_REPORT           00000000
+            """.trimIndent(),
+        )
+
+        assertEquals(listOf(ExecStep.Tap(540, 1_170, delayAfterMs = 0L)), acc.steps())
+    }
+
+    @Test
+    fun `Type A 单指滑动生成 Swipe`() {
+        val acc = typeAAccumulator()
+        feed(
+            acc,
+            """
+            [  7000.100000] EV_ABS       ABS_MT_POSITION_X    00000064
+            [  7000.100000] EV_ABS       ABS_MT_POSITION_Y    000000c8
+            [  7000.100000] EV_KEY       BTN_TOUCH            DOWN
+            [  7000.100000] EV_SYN       SYN_REPORT           00000000
+            [  7000.200000] EV_ABS       ABS_MT_POSITION_X    0000012c
+            [  7000.200000] EV_ABS       ABS_MT_POSITION_Y    00000258
+            [  7000.200000] EV_SYN       SYN_REPORT           00000000
+            [  7000.300000] EV_ABS       ABS_MT_POSITION_X    000001f4
+            [  7000.300000] EV_ABS       ABS_MT_POSITION_Y    000003e8
+            [  7000.300000] EV_SYN       SYN_REPORT           00000000
+            [  7000.400000] EV_ABS       ABS_MT_PRESSURE      00000000
+            [  7000.400000] EV_KEY       BTN_TOUCH            UP
+            [  7000.400000] EV_SYN       SYN_REPORT           00000000
+            """.trimIndent(),
+        )
+
+        assertEquals(
+            listOf(ExecStep.Swipe(100, 200, 500, 1_000, durationMs = 300, delayAfterMs = 0L)),
+            acc.steps(),
+        )
+    }
+
+    @Test
+    fun `Type A 一帧两个触点生成多指手势`() {
+        val acc = typeAAccumulator()
+        feed(
+            acc,
+            """
+            [  7000.100000] EV_ABS       ABS_MT_POSITION_X    0000012c
+            [  7000.100000] EV_ABS       ABS_MT_POSITION_Y    00000190
+            [  7000.100000] EV_SYN       SYN_MT_REPORT        00000000
+            [  7000.100000] EV_ABS       ABS_MT_POSITION_X    00000320
+            [  7000.100000] EV_ABS       ABS_MT_POSITION_Y    00000384
+            [  7000.100000] EV_SYN       SYN_MT_REPORT        00000000
+            [  7000.100000] EV_KEY       BTN_TOUCH            DOWN
+            [  7000.100000] EV_SYN       SYN_REPORT           00000000
+            [  7000.150000] EV_ABS       ABS_MT_POSITION_X    0000015e
+            [  7000.150000] EV_ABS       ABS_MT_POSITION_Y    000001c2
+            [  7000.150000] EV_SYN       SYN_MT_REPORT        00000000
+            [  7000.150000] EV_ABS       ABS_MT_POSITION_X    00000352
+            [  7000.150000] EV_ABS       ABS_MT_POSITION_Y    000003b6
+            [  7000.150000] EV_SYN       SYN_MT_REPORT        00000000
+            [  7000.150000] EV_SYN       SYN_REPORT           00000000
+            [  7000.200000] EV_ABS       ABS_MT_TOUCH_MAJOR   00000000
+            [  7000.200000] EV_ABS       ABS_MT_PRESSURE      00000000
+            [  7000.200000] EV_KEY       BTN_TOUCH            UP
+            [  7000.200000] EV_SYN       SYN_REPORT           00000000
+            """.trimIndent(),
+        )
+
+        val step = acc.steps().single() as ExecStep.MultiGesture
+        assertEquals(2, step.pointers.size)
+        assertEquals(100, step.durationMs)
+        assertEquals(GesturePoint(300, 400, 0L), step.pointers[0].points.first())
+        assertEquals(GesturePoint(350, 450, 50L), step.pointers[0].points[1])
+        assertEquals(GesturePoint(800, 900, 0L), step.pointers[1].points.first())
+        assertEquals(GesturePoint(850, 950, 50L), step.pointers[1].points[1])
+        assertEquals(100L, step.pointers[0].endMs)
+        assertEquals(100L, step.pointers[1].endMs)
+    }
+
+    @Test
+    fun `Type A 双指错位抬起仍收尾为同一个手势`() {
+        val acc = typeAAccumulator()
+        feed(
+            acc,
+            """
+            [  7000.100000] EV_ABS       ABS_MT_POSITION_X    0000012c
+            [  7000.100000] EV_ABS       ABS_MT_POSITION_Y    00000190
+            [  7000.100000] EV_ABS       ABS_MT_POSITION_X    00000320
+            [  7000.100000] EV_ABS       ABS_MT_POSITION_Y    00000384
+            [  7000.100000] EV_KEY       BTN_TOUCH            DOWN
+            [  7000.100000] EV_SYN       SYN_REPORT           00000000
+            [  7000.200000] EV_ABS       ABS_MT_POSITION_X    00000320
+            [  7000.200000] EV_ABS       ABS_MT_POSITION_Y    00000384
+            [  7000.200000] EV_SYN       SYN_REPORT           00000000
+            [  7000.300000] EV_ABS       ABS_MT_TOUCH_MAJOR   00000000
+            [  7000.300000] EV_KEY       BTN_TOUCH            UP
+            [  7000.300000] EV_SYN       SYN_REPORT           00000000
+            """.trimIndent(),
+        )
+
+        val step = acc.steps().single() as ExecStep.MultiGesture
+        assertEquals(2, step.pointers.size)
+        // 少了一个触点只是抬起，不能在手势中途收尾
+        assertEquals(200, step.durationMs)
+        assertEquals(100L, step.pointers[1].endMs)
+        assertEquals(200L, step.pointers[0].endMs)
+    }
+
+    @Test
+    fun `Type A 两次手势之间回写 delayAfterMs`() {
+        val acc = typeAAccumulator()
+        feed(
+            acc,
+            """
+            [  7000.100000] EV_ABS       ABS_MT_POSITION_X    00000064
+            [  7000.100000] EV_ABS       ABS_MT_POSITION_Y    00000064
+            [  7000.100000] EV_KEY       BTN_TOUCH            DOWN
+            [  7000.100000] EV_SYN       SYN_REPORT           00000000
+            [  7000.200000] EV_KEY       BTN_TOUCH            UP
+            [  7000.200000] EV_SYN       SYN_REPORT           00000000
+            [  7000.700000] EV_ABS       ABS_MT_POSITION_X    000000c8
+            [  7000.700000] EV_ABS       ABS_MT_POSITION_Y    000000c8
+            [  7000.700000] EV_KEY       BTN_TOUCH            DOWN
+            [  7000.700000] EV_SYN       SYN_REPORT           00000000
+            [  7000.800000] EV_KEY       BTN_TOUCH            UP
+            [  7000.800000] EV_SYN       SYN_REPORT           00000000
+            """.trimIndent(),
+        )
+
+        assertEquals(
+            listOf(
+                ExecStep.Tap(100, 100, delayAfterMs = 500L),
+                ExecStep.Tap(200, 200, delayAfterMs = 0L),
+            ),
+            acc.steps(),
+        )
     }
 }

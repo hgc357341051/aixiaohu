@@ -33,15 +33,23 @@ private val AXIS_PRESENT_LINE = Regex(
     RegexOption.IGNORE_CASE,
 )
 private val GETEVENT_LINE = Regex(
-    """^\[\s*(\d+)\.(\d+)\]\s+(?:/\S+:\s+)?(\S+)\s+(\S+)\s+([0-9a-fA-F]+)\s*$""",
+    """^\[\s*(\d+)\.(\d+)\]\s+(?:/\S+:\s+)?(\S+)\s+(\S+)\s+(\S+)\s*$""",
 )
 private val TOUCH_DEVICE_PATH = Regex("^/dev/input/event\\d+$")
 
 /**
+ * 触摸设备协议类型。
+ *
+ * [B] 用 ABS_MT_SLOT 复用触点、用 ABS_MT_TRACKING_ID 表达按下/抬起，可按 slot 跟踪手指；
+ * [A] 老内核没有 slot 概念，每帧把当前所有触点的 X/Y 依次上报一遍，只能按帧内出现顺序配对。
+ */
+internal enum class TouchProtocol { B, A }
+
+/**
  * 触摸设备能力快照。
  *
- * Type B（现代手机）必须同时具备 ABS_MT_SLOT 与 ABS_MT_TRACKING_ID，才能按 slot 录制/注入多指；
- * 缺少二者属于 Type A 旧协议，被动录制无法区分手指，注入侧也不应冒险猜测。
+ * Type B（现代手机）以 ABS_MT_SLOT 复用触点，配合 ABS_MT_TRACKING_ID 才能按 slot 录制/注入多指；
+ * 缺少 SLOT 属于 Type A 旧协议，注册不了 slot，但仍能按帧内的坐标顺序被动录制。
  */
 internal data class RawTouchDevice(
     val path: String,
@@ -53,6 +61,10 @@ internal data class RawTouchDevice(
     val pressureMax: Int = 0,
     val touchMajorMax: Int = 0,
 ) {
+    /** 有 ABS_MT_SLOT 才能按 slot 复用触点，归为 Type B；没有则走 Type A 逐帧配对。 */
+    val protocol: TouchProtocol = if (hasSlot) TouchProtocol.B else TouchProtocol.A
+
+    /** 仅 Type B 的 slot/tracking id 组合能稳定注入多指；录制侧不受此限制。 */
     val supportsMultiTouchCapture: Boolean get() = hasSlot && hasTrackingId
 }
 
@@ -127,10 +139,25 @@ internal fun pickTouchDevice(listing: String, devices: List<RawTouchDevice>): Ra
             name.contains("ts", ignoreCase = true) ||
             device.path.contains("touch", ignoreCase = true)
     }
-    return touchLike.firstOrNull { it.supportsMultiTouchCapture }
+    // 优先 Type B（多指语义可靠），其次 Type A；同一协议内保持 getevent 输出顺序
+    return touchLike.firstOrNull { it.protocol == TouchProtocol.B }
+        ?: touchLike.firstOrNull { it.protocol == TouchProtocol.A }
         ?: touchLike.firstOrNull()
-        ?: devices.firstOrNull { it.supportsMultiTouchCapture }
+        ?: devices.firstOrNull { it.protocol == TouchProtocol.B }
         ?: devices.first()
+}
+
+/**
+ * 事件值的两种打印形态：坐标/压力是十六进制，具名按键则是 UP/DOWN。
+ * Type A 老设备抬手时常常只报 BTN_TOUCH UP（没有任何 ABS_MT_* 轴），解析不了就会永远收不到抬手。
+ */
+private fun parseEventValue(raw: String): Int? {
+    runCatching { java.lang.Long.parseLong(raw, 16).toInt() }.getOrNull()?.let { return it }
+    return when (raw.uppercase()) {
+        "UP" -> 0
+        "DOWN" -> 1
+        else -> null
+    }
 }
 
 /** 解析 `getevent -lt` 单行；毫秒只取到小数点后三位，避免亚毫秒抖动。 */
@@ -139,8 +166,7 @@ internal fun parseGeteventLine(line: String): ParsedEvent? {
     val seconds = match.groupValues[1].toDoubleOrNull() ?: return null
     val millis = match.groupValues[2].take(3).padEnd(3, '0').toIntOrNull() ?: return null
     val timeMs = (seconds * 1000.0 + millis.toDouble()).roundToLong()
-    val value = runCatching { java.lang.Long.parseLong(match.groupValues[5], 16).toInt() }.getOrNull()
-        ?: return null
+    val value = parseEventValue(match.groupValues[5]) ?: return null
     return ParsedEvent(timeMs, match.groupValues[3], match.groupValues[4], value)
 }
 
@@ -179,7 +205,8 @@ internal fun mapDisplayToPanel(
  * 把一次完整手势内的所有触点按时间轴累积：
  *  - 单指仍生成 Tap/Swipe，保持旧宏可读、可编辑；
  *  - 两指及以上重叠时生成一个 [ExecStep.MultiGesture]，每根手指独立保留轨迹。
- * X/Y 可先于 TRACKING_ID 到达，因此每个 slot 的坐标先缓存再在 SYN 帧提交。
+ * Type B（[protocol] == [TouchProtocol.B]）按 slot 跟踪手指，X/Y 可先于 TRACKING_ID 到达，先缓存再在 SYN 帧提交；
+ * Type A（[protocol] == [TouchProtocol.A]）没有 slot/tracking id，改按 SYN 帧内的坐标出现顺序配对。
  * 所有可变状态由 [lock] 保护，stop() 可与读取线程并发。
  */
 internal class TouchAccumulator(
@@ -190,6 +217,7 @@ internal class TouchAccumulator(
     private val mapper: CoordinateMapper = CoordinateMapper(),
     private val rotation: Int = Surface.ROTATION_0,
     private val devicePath: String = "",
+    private val protocol: TouchProtocol = TouchProtocol.B,
 ) {
     private val lock = Any()
     private val steps = mutableListOf<ExecStep>()
@@ -197,12 +225,19 @@ internal class TouchAccumulator(
     private val gesturePointers = mutableListOf<ActivePointer>()
     private val slotPositions = HashMap<Int, Pair<Int, Int>>()
 
+    // Type A 专有状态：当前帧内按出现顺序累积的 X/Y，以及上一帧的触点坐标
+    private val frameXs = ArrayList<Int>()
+    private val frameYs = ArrayList<Int>()
+    private var frameHasTouchData = false
+    private var previousFramePoints: List<Pair<Int, Int>> = emptyList()
+
     private var currentSlot = 0
     private var gestureStartMs: Long? = null
     private var previousEndMs: Long? = null
     private var lastEventMs: Long = 0L
 
     fun accept(ev: ParsedEvent): ExecStep? = synchronized(lock) {
+        if (protocol == TouchProtocol.A) return@synchronized acceptTypeA(ev)
         when (ev.name) {
             "ABS_MT_SLOT" -> {
                 if (ev.value >= 0) currentSlot = ev.value
@@ -252,6 +287,117 @@ internal class TouchAccumulator(
 
             else -> null
         }
+    }
+
+    /**
+     * 调用方需持有 [lock]。
+     * Type A 一帧里只有坐标：X/Y 按出现顺序入队，SYN_REPORT 才是完整一帧的边界，
+     * 每帧把"当前所有触点"完整报一遍，因此触点的身份只能用帧内索引近似。
+     * ABS_MT_TRACKING_ID 在 Type A 上经常缺失或语义不一致，这里不依赖它。
+     */
+    private fun acceptTypeA(ev: ParsedEvent): ExecStep? {
+        ev.timeMs?.let { lastEventMs = maxOf(lastEventMs, it) }
+        when (ev.name) {
+            "ABS_MT_POSITION_X" -> {
+                frameXs += ev.value.coerceIn(0, maxX)
+                frameHasTouchData = true
+                return null
+            }
+
+            "ABS_MT_POSITION_Y" -> {
+                frameYs += ev.value.coerceIn(0, maxY)
+                frameHasTouchData = true
+                return null
+            }
+
+            "SYN_REPORT" -> {
+                val frameMs = ev.timeMs ?: lastEventMs
+                val step = commitTypeAFrame(frameMs)
+                frameXs.clear()
+                frameYs.clear()
+                frameHasTouchData = false
+                return step
+            }
+
+            else -> {
+                // 老内核抬手时只报 ABS_MT_TOUCH_MAJOR/PRESSURE 归零或 BTN_TOUCH UP，
+                // 用它区分"本帧无触点=全部抬起"和与触摸无关的空帧
+                if (ev.name.startsWith("ABS_MT_") || ev.name == "BTN_TOUCH") frameHasTouchData = true
+                return null
+            }
+        }
+    }
+
+    /**
+     * 调用方需持有 [lock]。
+     * 帧内第 i 对 (x, y) 就是第 i 个 pointer，与上一帧比较：
+     * 消失的索引先收 UP，再为新出现的索引补 DOWN，最后才给仍然存在的手指提交本帧采样。
+     * 顺序不能颠倒：先 DOWN 再 UP 会让计数变化的那一帧产出一条"手指原地跳位"的 move。
+     */
+    private fun commitTypeAFrame(frameMs: Long): ExecStep? {
+        val pairCount = minOf(frameXs.size, frameYs.size)
+        val points = ArrayList<Pair<Int, Int>>(pairCount)
+        for (index in 0 until pairCount) points += frameXs[index] to frameYs[index]
+        val previous = previousFramePoints
+        previousFramePoints = points
+
+        if (points.isEmpty()) {
+            // 一整帧没有任何触点 = 全部抬起；无关事件帧（如只按键）不能当作抬手
+            if (active.isEmpty() || !frameHasTouchData) return null
+            return releaseAllTypeA(frameMs)
+        }
+
+        var emitted: ExecStep? = null
+        for (index in previous.indices) {
+            if (index >= points.size) {
+                val step = onTypeAUp(index, frameMs)
+                if (step != null) emitted = step
+            }
+        }
+        for (index in points.indices) {
+            if (index >= previous.size) onTypeADown(index, points[index].first, points[index].second, frameMs)
+        }
+        for (index in points.indices) {
+            val pointer = active[index] ?: continue
+            pointer.lastRawX = points[index].first
+            pointer.lastRawY = points[index].second
+            pointer.lastMs = frameMs
+            commitSample(pointer, frameMs)
+        }
+        return emitted
+    }
+
+    /** 调用方需持有 [lock]。整帧无触点：把仍在按下状态的触点全部收尾。 */
+    private fun releaseAllTypeA(frameMs: Long): ExecStep? {
+        var emitted: ExecStep? = null
+        active.keys.toList().forEach { index ->
+            val step = onTypeAUp(index, frameMs)
+            if (step != null) emitted = step
+        }
+        return emitted
+    }
+
+    /** 调用方需持有 [lock]。Type A 的触点身份就是帧内索引，等价于分配了一个自增 tracking id。 */
+    private fun onTypeADown(index: Int, x: Int, y: Int, frameMs: Long) {
+        if (active.containsKey(index) || active.size >= MAX_POINTERS) return
+        if (gesturePointers.isEmpty()) {
+            gestureStartMs = frameMs
+            val gap = previousEndMs?.let { (frameMs - it).coerceAtLeast(0L).clampDelayMs() } ?: 0L
+            applyDelayToLastStep(gap)
+        }
+        val pointer = ActivePointer(index, frameMs, x, y)
+        active[index] = pointer
+        gesturePointers += pointer
+        lastEventMs = maxOf(lastEventMs, frameMs)
+    }
+
+    private fun onTypeAUp(index: Int, frameMs: Long): ExecStep? {
+        val pointer = active[index] ?: return null
+        commitSample(pointer, frameMs, force = true)
+        pointer.endMs = frameMs
+        active.remove(index)
+        lastEventMs = maxOf(lastEventMs, frameMs)
+        return if (active.isEmpty()) finalizeGesture(frameMs) else null
     }
 
     /** 被动录制被中止时，把仍在进行的触摸按最后一次已知时间收尾。 */
@@ -458,16 +604,16 @@ class AdbTouchRecorder(
         Log.d("AdbTouchRecorder", "record screen=${screenWidth}x$screenHeight raw=${rawWidth}x$rawHeight rotation=$rotation")
 
         val listing = runCatching { adbClient.readShellOutput("getevent -pl") }.getOrNull()
-            ?: return fail("未找到可监听的触摸设备（getevent 不可用）")
+            ?: return fail("未找到可录制的触摸设备（getevent 不可用）")
         val devices = runCatching { parseGeteventDevices(listing) }.getOrDefault(emptyList())
-        if (devices.isEmpty()) return fail("未找到可监听的触摸设备（getevent 不可用）")
+        // parseGeteventDevices 只保留同时具备 X/Y 轴的节点，走到这里说明既没有 SLOT 也没有 POSITION_X/Y
+        if (devices.isEmpty()) return fail("未找到可录制的触摸设备（缺少 ABS_MT_POSITION_X/Y 触摸轴）")
         val device = pickTouchDevice(listing, devices)
         if (!TOUCH_DEVICE_PATH.matches(device.path)) {
             return fail("触摸设备路径异常：${device.path}")
         }
-        if (!device.supportsMultiTouchCapture) {
-            return fail("该触摸设备使用旧版 Type A 协议（缺少 ABS_MT_SLOT/TRACKING_ID），无法被动录制；请改用截图标注")
-        }
+        // Type A 没有 slot/tracking id 也必须能录：由 TouchAccumulator 按 SYN 帧配对坐标
+        Log.d("AdbTouchRecorder", "record device=${device.path} protocol=${device.protocol}")
 
         val opened = runCatching { adbClient.openShellStream("getevent -lt ${device.path}") }.getOrNull()
             ?: return fail("无法监听触摸设备（getevent 权限不足或不支持）")
@@ -475,6 +621,7 @@ class AdbTouchRecorder(
         // 局部 acc 独立于可变字段：stop() 清空字段后迟到回调也不会读到 null/空列表
         val acc = TouchAccumulator(
             screenWidth, screenHeight, device.maxX, device.maxY, mapper, rotation, device.path,
+            device.protocol,
         )
         val conflict = synchronized(stateLock) {
             if (recording) {
@@ -509,7 +656,7 @@ class AdbTouchRecorder(
                     while (recording && isActive) {
                         when (val packet = s.read()) {
                             is AdbShellPacket.Exit -> {
-                                if (recording) report("getevent 监听已结束，改用截图标注录制")
+                                if (recording) report("getevent 监听已结束，请重新开始录制")
                                 break
                             }
 
