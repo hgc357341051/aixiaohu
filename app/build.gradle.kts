@@ -5,11 +5,11 @@ plugins {
 }
 
 android {
-    namespace = "com.example.voicectl"
+    namespace = "com.aixiaohuadb"
     compileSdk = 35
 
     defaultConfig {
-        applicationId = "com.example.voicectl"
+        applicationId = "com.aixiaohuadb"
         minSdk = 29
         targetSdk = 35
         versionCode = 1

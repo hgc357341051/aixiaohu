@@ -48,7 +48,7 @@ jobs:
       - name: 上传构建产物
         uses: actions/upload-artifact@v4
         with:
-          name: voicectl-dev-debug-${{ github.sha }}
+          name: aixiaohuadb-dev-debug-${{ github.sha }}
           path: artifacts/*.apk
           retention-days: 14
 
@@ -63,7 +63,8 @@ jobs:
             - Commit: `${{ github.sha }}`
             - Branch: `${{ github.ref_name }}`
             - Workflow run: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
-            - APK: `app-dev-debug-${{ github.sha }}.apk`
+            - APK: `app-dev-debug-${{ github.sha }}.apk`（Release 资产取前 8 位 short sha）
+            - 包名: `com.aixiaohuadb`
 
             说明：该版本为自动构建的预发布包，TFLite 真实模型与声纹模板仍待集成。
           prerelease: true
