@@ -1,163 +1,88 @@
 package com.aixiaohuadb.ui.mapping
 
-import androidx.compose.foundation.clickable
-import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
-import androidx.compose.foundation.layout.width
 import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.filled.Map
 import androidx.compose.material.icons.filled.Visibility
 import androidx.compose.material3.MaterialTheme
-import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.collectAsState
+import androidx.compose.runtime.getValue
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.unit.dp
-import com.aixiaohuadb.exec.CommandLibrary
-import com.aixiaohuadb.exec.ExecStep
 import com.aixiaohuadb.ui.common.CodeBlock
 import com.aixiaohuadb.ui.common.InfoCard
-import com.aixiaohuadb.ui.common.PillChip
 import com.aixiaohuadb.ui.common.ScreenFrame
 import com.aixiaohuadb.ui.common.SectionCard
 import com.aixiaohuadb.ui.common.SectionTitle
 import com.aixiaohuadb.ui.common.Segment
-import com.aixiaohuadb.ui.common.StatusBadge
-import com.aixiaohuadb.ui.common.Tone
+import com.aixiaohuadb.ui.overlay.OverlayControlViewModel
 import com.aixiaohuadb.ui.theme.Muted
 import com.aixiaohuadb.ui.theme.Spacing
 
 @Composable
-fun MappingScreen(vm: MappingViewModel, onBack: () -> Unit, onTab: (String) -> Unit) {
-    ScreenFrame(title = "指令映射配置", subtitle = "库 v1.2 · 基准 1080×2340", showBack = true, onBack = onBack, onTab = onTab) {
+fun MappingScreen(vm: MappingViewModel, overlayVm: OverlayControlViewModel, onBack: () -> Unit, onTab: (String) -> Unit) {
+    val macros by overlayVm.macros.collectAsState()
+    ScreenFrame(title = "宏步骤预览", subtitle = "基准 1080×2340 · 兼容 A11y / ADB", showBack = true, onBack = onBack, onTab = onTab) {
         InfoCard {
             Text(
-                "坐标库、步骤模板、指令编排三者分离；装备组指令引用独立配置的位置组坐标。运行时 x=x0×W/1080、y=y0×H/2340。",
+                "坐标统一以 1080×2340 为基准；运行时 x=x0×W/1080、y=y0×H/2340，无障碍与 ADB 共用同一换算。",
                 style = MaterialTheme.typography.labelSmall,
                 color = Muted,
             )
         }
         Segment(
-            options = listOf("坐标库", "指令编排", "执行预览"),
+            options = listOf("宏列表", "执行预览"),
             selectedIndex = vm.tab,
             onSelect = vm::selectTab,
         )
         Spacer(Modifier.height(Spacing.md))
-
-        when (vm.tab) {
-            0 -> {
-                SectionCard(icon = Icons.Filled.Map, title = "公共坐标 · 6") {
-                    CoordinateRows(vm, CommandLibrary.common)
-                }
-                SectionCard(title = "位置组坐标 · 6") {
-                    CoordinateRows(vm, CommandLibrary.slots)
-                }
-                SectionCard(title = "装备格坐标 · 7") {
-                    CoordinateRows(vm, CommandLibrary.equips)
-                }
-            }
-            1 -> {
-                val revision = vm.expandedRevision
-                revision
-                InfoCard {
-                    Text(
-                        "装备组默认包含「选中位置组槽位」步骤，槽位由 target_slot 参数指定（默认 1）。",
-                        style = MaterialTheme.typography.labelSmall,
-                        color = Muted,
-                    )
-                }
-                CommandLibrary.commandActions.take(14).forEach { action ->
-                    InfoCard {
-                        Row(
-                            modifier = Modifier
-                                .fillMaxWidth()
-                                .clickable { vm.toggleExpanded(action.commandId) },
-                            verticalAlignment = androidx.compose.ui.Alignment.CenterVertically,
-                        ) {
-                            Text(
-                                action.name,
-                                style = MaterialTheme.typography.bodySmall,
-                                modifier = Modifier.weight(1f),
-                            )
-                            PillChip("${action.steps.size} 步")
+        if (vm.tab == 0) {
+            SectionTitle("我的宏 · ${macros.size}")
+            macros.forEach { macro ->
+                SectionCard(title = macro.name) {
+                    macro.steps.forEachIndexed { index, step ->
+                        @Suppress("DEPRECATION")
+                        val text = when (step) {
+                            is com.aixiaohuadb.exec.ExecStep.Tap ->
+                                "Tap (${step.x},${step.y}) 间隔 ${step.delayAfterMs}ms"
+                            is com.aixiaohuadb.exec.ExecStep.Swipe ->
+                                "Swipe (${step.fromX},${step.fromY})→(${step.toX},${step.toY}) ${step.durationMs}ms 间隔 ${step.delayAfterMs}ms"
+                            is com.aixiaohuadb.exec.ExecStep.MultiGesture ->
+                                "MultiGesture ${step.pointers.size}指 ${step.durationMs}ms 间隔 ${step.delayAfterMs}ms"
+                            is com.aixiaohuadb.exec.ExecStep.Wait -> "Wait ${step.ms}ms（旧数据）"
+                            is com.aixiaohuadb.exec.ExecStep.Verify -> "Verify ${step.key}"
                         }
-                        if (action.commandId in vm.expandedIds) {
-                            Spacer(Modifier.height(Spacing.sm))
-                            action.steps.forEachIndexed { index, step ->
-                                val text = when (step) {
-                                    is ExecStep.Tap -> "tap  ${step.key}  (${step.x},${step.y})"
-                                    is ExecStep.Wait -> "wait ${step.ms}ms"
-                                    is ExecStep.Verify -> "verify ${step.key}"
-                                }
-                                Row(modifier = Modifier.padding(vertical = 2.dp)) {
-                                    Text(
-                                        "${index + 1}.",
-                                        style = MaterialTheme.typography.labelSmall,
-                                        color = com.aixiaohuadb.ui.theme.Brand,
-                                    )
-                                    Spacer(Modifier.width(Spacing.xs))
-                                    Text(
-                                        text,
-                                        fontFamily = FontFamily.Monospace,
-                                        style = MaterialTheme.typography.labelSmall,
-                                    )
-                                }
-                            }
+                        Row(modifier = Modifier.padding(vertical = 2.dp)) {
+                            Text("${index + 1}.", style = MaterialTheme.typography.labelSmall, color = Muted)
+                            Spacer(Modifier.padding(start = Spacing.xs))
+                            Text(text, style = MaterialTheme.typography.labelSmall)
                         }
+                    }
+                    if (macro.steps.isEmpty()) {
+                        Text("空宏", style = MaterialTheme.typography.labelSmall, color = Muted)
                     }
                 }
             }
-            else -> {
-                SectionCard(icon = Icons.Filled.Visibility, title = "执行预览") {
-                    Row(verticalAlignment = androidx.compose.ui.Alignment.CenterVertically) {
-                        Text("换名刀 · CMD_HUAN_MINGDAO", style = MaterialTheme.typography.bodySmall)
-                        Spacer(Modifier.weight(1f))
-                        StatusBadge(text = "失败即停", tone = Tone.OK)
-                    }
-                }
-                CodeBlock(title = "输入命令示意 · 不在端内拼接字符串命令", code = vm.previewCode())
-                InfoCard {
-                    Text(
-                        "每步点击后校验 UI 状态，失败立即停止序列，重试 ≤1 次，避免半执行误换装。",
-                        style = MaterialTheme.typography.labelSmall,
-                        color = Muted,
-                    )
-                }
+        } else {
+            SectionCard(icon = Icons.Filled.Visibility, title = "强类型执行预览") {
+                Text(
+                    "端内不拼接任意 shell 字符串；只有 Tap/Swipe/KeyEvent 三种强类型命令。",
+                    style = MaterialTheme.typography.labelSmall,
+                    color = Muted,
+                )
             }
+            val first = macros.firstOrNull()
+            CodeBlock(
+                title = first?.name ?: "尚未创建宏",
+                code = vm.previewCode(first?.steps.orEmpty()),
+            )
         }
-    }
-}
-
-@Composable
-private fun CoordinateRows(vm: MappingViewModel, entries: List<CommandLibrary.CoordinateEntry>) {
-    Column(verticalArrangement = Arrangement.spacedBy(Spacing.sm)) {
-        entries.forEach { entry ->
-            val (x, y) = vm.coordinateOf(entry.key)
-            Column(modifier = Modifier.fillMaxWidth()) {
-                Text(entry.key, style = MaterialTheme.typography.labelSmall, fontFamily = FontFamily.Monospace)
-                Text(entry.label, style = MaterialTheme.typography.labelSmall, color = Muted)
-                Row(modifier = Modifier.fillMaxWidth()) {
-                    OutlinedTextField(
-                        value = x.toString(),
-                        onValueChange = { vm.updateCoordinate(entry.key, it.toIntOrNull() ?: 0, y) },
-                        label = { Text("x") },
-                        modifier = Modifier.weight(1f),
-                    )
-                    Spacer(Modifier.width(Spacing.sm))
-                    OutlinedTextField(
-                        value = y.toString(),
-                        onValueChange = { vm.updateCoordinate(entry.key, x, it.toIntOrNull() ?: 0) },
-                        label = { Text("y") },
-                        modifier = Modifier.weight(1f),
-                    )
-                }
-            }
-        }
+        Spacer(Modifier.height(Spacing.sm))
     }
 }

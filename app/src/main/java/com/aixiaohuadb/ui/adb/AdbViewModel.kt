@@ -6,10 +6,16 @@ import android.net.Uri
 import android.provider.Settings
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
+import com.aixiaohuadb.adb.AdbAuditEntry
+import com.aixiaohuadb.adb.AdbAuditLog
+import com.aixiaohuadb.adb.AdbBridgeState
 import com.aixiaohuadb.adb.AdbClient
 import com.aixiaohuadb.adb.AdbNetwork
 import com.aixiaohuadb.adb.AdbStatus
 import com.aixiaohuadb.adb.CommandResult
+import com.aixiaohuadb.adb.CommandSource
+import com.aixiaohuadb.adb.RawShellPolicy
+import com.aixiaohuadb.adb.RawShellRequest
 import com.aixiaohuadb.di.AppContainer
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
@@ -27,6 +33,11 @@ data class AdbUiState(
     val pairCode: String = "",
     val connectHost: String = "127.0.0.1",
     val connectPort: String = "",
+    val bridge: AdbBridgeState = AdbBridgeState(),
+    val rawCommand: String = "",
+    val pendingRaw: RawShellRequest? = null,
+    val rawResult: String? = null,
+    val audit: List<AdbAuditEntry> = emptyList(),
 )
 
 /** ADB 连接页状态：真机环境、阶段、配对/连接动作，全部来自真实检测。 */
@@ -42,6 +53,8 @@ class AdbViewModel(
             status = client.status.value,
             pairHost = detectedHost,
             connectHost = detectedHost,
+            bridge = container.adbBridgeController.state.value,
+            audit = AdbAuditLog.recent(context),
         ),
     )
     val ui: StateFlow<AdbUiState> = _ui.asStateFlow()
@@ -57,6 +70,11 @@ class AdbViewModel(
                         connectHost = it.connectHost.ifBlank { detectedHost },
                     )
                 }
+            }
+        }
+        viewModelScope.launch {
+            container.adbBridgeController.state.collect { bridge ->
+                _ui.update { it.copy(bridge = bridge) }
             }
         }
     }
@@ -132,6 +150,51 @@ class AdbViewModel(
         val result = client.probe()
         _ui.update { it.copy(busy = false, probeResult = result) }
     }
+
+    fun onRawCommand(value: String) = _ui.update { it.copy(rawCommand = value) }
+
+    fun requestRaw() = viewModelScope.launch {
+        val command = _ui.value.rawCommand.trim()
+        val req = RawShellRequest(command, CommandSource.USER_CONSOLE)
+        val verdict = RawShellPolicy.decide(req)
+        if (verdict.decision == RawShellPolicy.Decision.DENY) {
+            AdbAuditLog.append(context, req, verdict, CommandResult(false, verdict.reason))
+            _ui.update {
+                it.copy(
+                    message = "命令被拒绝：${verdict.reason}",
+                    pendingRaw = null,
+                    rawResult = null,
+                )
+            }
+            refreshAudit()
+            return@launch
+        }
+        // 每条 raw 命令必须显式确认；不存在“本次会话不再提示”的跳过通道
+        _ui.update { it.copy(pendingRaw = req, message = null) }
+    }
+
+    fun confirmRaw() = viewModelScope.launch {
+        val req = _ui.value.pendingRaw ?: return@launch
+        _ui.update { it.copy(pendingRaw = null) }
+        executeRaw(req)
+    }
+
+    fun cancelRaw() = _ui.update { it.copy(pendingRaw = null) }
+
+    private suspend fun executeRaw(req: RawShellRequest) {
+        _ui.update { it.copy(busy = true, message = null, rawResult = null) }
+        val result = container.adbBridgeController.submitRaw(req)
+        _ui.update {
+            it.copy(
+                busy = false,
+                rawResult = "${if (result.ok) "执行成功" else "执行失败"}：${result.message}",
+                message = if (result.ok) null else result.message,
+            )
+        }
+        refreshAudit()
+    }
+
+    fun refreshAudit() = _ui.update { it.copy(audit = AdbAuditLog.recent(context)) }
 
     fun dismissMessage() = _ui.update { it.copy(message = null) }
 

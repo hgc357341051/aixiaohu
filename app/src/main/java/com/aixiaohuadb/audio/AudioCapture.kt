@@ -8,6 +8,7 @@ import android.media.AudioRecord
 import android.media.MediaRecorder
 import androidx.core.content.ContextCompat
 import com.aixiaohuadb.config.AppConfig
+import com.aixiaohuadb.voice.VoiceAudio
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
@@ -22,7 +23,7 @@ import kotlinx.coroutines.launch
 class AudioCapture(
     private val context: Context,
     private val config: AppConfig,
-) {
+) : VoiceAudio {
     private val sampleRate = config.feature.sampleRate
     private val frameSize = 400 // 25ms
     private var record: AudioRecord? = null
@@ -33,14 +34,14 @@ class AudioCapture(
     val frames: SharedFlow<FloatArray> = _frames
 
     @Volatile
-    var isCapturing: Boolean = false
+    override var isCapturing: Boolean = false
         private set
 
     fun hasPermission(): Boolean =
         ContextCompat.checkSelfPermission(context, Manifest.permission.RECORD_AUDIO) ==
             PackageManager.PERMISSION_GRANTED
 
-    fun start(): Boolean {
+    override fun start(): Boolean {
         if (isCapturing || !hasPermission()) return false
         val minBuffer = AudioRecord.getMinBufferSize(
             sampleRate,
@@ -81,7 +82,7 @@ class AudioCapture(
         return true
     }
 
-    fun stop() {
+    override fun stop() {
         isCapturing = false
         job?.cancel()
         job = null
@@ -94,8 +95,16 @@ class AudioCapture(
         record = null
     }
 
-    fun close() {
+    /**
+     * 释放麦克风与 AudioRecord，但保留采集协程 scope，使语音再次 enable 时能重新 start()。
+     * 进程级最终销毁请用 [dispose]。
+     */
+    override fun close() {
         stop()
+    }
+
+    override fun dispose() {
+        close()
         scope.cancel()
     }
 }

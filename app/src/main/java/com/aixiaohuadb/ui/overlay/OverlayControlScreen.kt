@@ -24,6 +24,7 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableFloatStateOf
+import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
@@ -31,7 +32,6 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.unit.dp
-import com.aixiaohuadb.exec.CommandLibrary
 import com.aixiaohuadb.service.ControlMode
 import com.aixiaohuadb.service.OverlayWidget
 import com.aixiaohuadb.service.OverlayWidget.Companion.MAX_ALPHA
@@ -71,6 +71,12 @@ fun OverlayControlScreen(
     val granted = remember { OverlayControlService.isPermissionGranted(context) }
     val trackingReady = remember { ForegroundGameMonitor.hasForegroundTracking(context) }
 
+    val voiceEnabled by vm.voiceEnabled.collectAsState()
+    val bindings by vm.bindings.collectAsState()
+    var pendingVoice by remember { mutableStateOf(false) }
+    var bindingSlot by remember { mutableIntStateOf(0) }
+    var bindingPhrase by remember { mutableStateOf("") }
+
     ScreenFrame(
         title = "悬浮控制",
         subtitle = "游戏内长按悬浮球可直接调节",
@@ -107,26 +113,29 @@ fun OverlayControlScreen(
             Spacer(Modifier.height(Spacing.md))
         }
 
-        // 控制模式：语音识别 / 手动点触
+        // 控制模式：三值并列，语音未开启时二次确认
         SectionCard(icon = Icons.Filled.VideogameAsset, title = "控制模式") {
             Text(
-                "选择指令的触发方式，游戏中也可长按悬浮球随时切换。",
+                "默认无障碍模式，不拾音。语音需显式开启；ADB 保持前台长连接。",
                 style = MaterialTheme.typography.bodySmall,
                 color = Muted,
             )
             Spacer(Modifier.height(Spacing.sm))
             Segment(
-                options = listOf("语音识别", "手动点触"),
-                selectedIndex = if (controlMode == ControlMode.VOICE) 0 else 1,
+                options = listOf("语音识别", "无障碍", "ADB"),
+                selectedIndex = ControlMode.entries.indexOf(controlMode),
                 onSelect = { index ->
-                    vm.setControlMode(if (index == 0) ControlMode.VOICE else ControlMode.MANUAL)
+                    val target = ControlMode.entries[index]
+                    if (target == ControlMode.VOICE && !voiceEnabled) pendingVoice = true
+                    else vm.setControlMode(target)
                 },
             )
             Spacer(Modifier.height(Spacing.sm))
             Text(
                 when (controlMode) {
-                    ControlMode.VOICE -> "语音模式：说「你好小胡」唤醒后下达指令，指令按钮作为辅助入口。"
-                    ControlMode.MANUAL -> "手动模式：关闭拾音与模型，仅靠悬浮指令/宏按钮点击执行，无常驻监听。"
+                    ControlMode.VOICE -> "语音模式：说出绑定说法触发用户宏；无常驻拾音之外的旁路。"
+                    ControlMode.ACCESSIBILITY -> "无障碍模式：不拾音，点击悬浮宏按钮由 A11y 手势执行。"
+                    ControlMode.ADB -> "ADB 模式：不拾音，保留 A11y 事件，后台长连接随时下发命令。"
                 },
                 style = MaterialTheme.typography.labelSmall,
                 color = Muted,
@@ -236,30 +245,76 @@ fun OverlayControlScreen(
             }
         }
 
-        // 添加指令
-        val available = CommandLibrary.panelItems.filter { (_, id) -> !widgets.any { it.commandId == id } }
-        SectionCard(icon = Icons.Filled.AddCircle, title = "添加指令按钮") {
-            if (available.isEmpty()) {
-                Text("全部指令都已创建", style = MaterialTheme.typography.bodySmall, color = Muted)
+        // 语音槽位绑定：0..13（14 为拒识槽，不可绑定），说法 → 用户宏
+        SectionCard(icon = Icons.Filled.AddCircle, title = "语音指令绑定") {
+            Text(
+                "内置固定指令已删除。把识别槽位绑定到你录制的宏，指令名只用于提示；槽位 15 为拒识槽不可绑定。",
+                style = MaterialTheme.typography.labelSmall,
+                color = Muted,
+            )
+            Spacer(Modifier.height(Spacing.sm))
+            OutlinedTextField(
+                value = bindingPhrase,
+                onValueChange = { bindingPhrase = it },
+                label = { Text("说法提示，如：换装连招") },
+                singleLine = true,
+                modifier = Modifier.fillMaxWidth(),
+            )
+            Spacer(Modifier.height(Spacing.sm))
+            Text("槽位 $bindingSlot", style = MaterialTheme.typography.labelSmall, color = Muted)
+            Slider(
+                value = bindingSlot.toFloat(),
+                onValueChange = { bindingSlot = it.toInt().coerceIn(0, 13) },
+                valueRange = 0f..13f,
+                steps = 12,
+            )
+            Spacer(Modifier.height(Spacing.sm))
+            if (macros.isEmpty()) {
+                Text("请先录制并保存一个宏", style = MaterialTheme.typography.bodySmall, color = Muted)
             } else {
-                available.chunked(2).forEach { row ->
-                    Row(modifier = Modifier.fillMaxWidth()) {
-                        row.forEach { (label, id) ->
-                            QuietButton(text = label, onClick = { vm.addPreset(id, label) }, enabled = granted)
-                            Spacer(Modifier.width(Spacing.sm))
-                        }
+                macros.forEach { macro ->
+                    TextButton(onClick = {
+                        vm.bind(bindingSlot, macro.macroId, bindingPhrase.ifBlank { macro.name })
+                    }) {
+                        Text("绑定槽位 $bindingSlot → ${macro.name}")
                     }
-                    Spacer(Modifier.height(Spacing.sm))
+                }
+            }
+            bindings.forEach { b ->
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Text(
+                        "槽位 ${b.slot + 1} · ${b.phrase} · 宏 ${b.macroId}",
+                        style = MaterialTheme.typography.labelSmall,
+                        modifier = Modifier.weight(1f),
+                    )
+                    TextButton(onClick = { vm.unbind(b.slot) }) { Text("解绑", color = Danger) }
                 }
             }
             Text(
-                "录制自定义宏：进游戏后单击悬浮球展开面板 → 开始录制。",
+                "录制自定义宏：进游戏后单击悬浮球展开面板 → 开始录制；📷 截屏后可在应用内标注。",
                 style = MaterialTheme.typography.labelSmall,
                 color = Muted,
                 modifier = Modifier.padding(top = Spacing.xs),
             )
         }
         Spacer(Modifier.height(Spacing.sm))
+    }
+
+    if (pendingVoice) {
+        AlertDialog(
+            onDismissRequest = { pendingVoice = false },
+            title = { Text("开启语音识别？") },
+            text = { Text("将启动麦克风拾音、加载语音模型并显示常驻通知。关闭后物理释放，不会后台监听。") },
+            confirmButton = {
+                TextButton(onClick = {
+                    pendingVoice = false
+                    vm.requestVoiceEnable { ok -> if (ok) vm.setControlMode(ControlMode.VOICE) }
+                }) { Text("确认开启") }
+            },
+            dismissButton = {
+                TextButton(onClick = { pendingVoice = false }) { Text("取消") }
+            },
+        )
     }
 }
 

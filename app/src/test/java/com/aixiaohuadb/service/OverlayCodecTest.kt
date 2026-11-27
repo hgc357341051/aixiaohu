@@ -1,6 +1,8 @@
 package com.aixiaohuadb.service
 
 import com.aixiaohuadb.exec.ExecStep
+import com.aixiaohuadb.exec.GesturePoint
+import com.aixiaohuadb.exec.GesturePointer
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertTrue
 import org.junit.Test
@@ -10,7 +12,7 @@ class OverlayCodecTest {
     @Test
     fun `widgets v2 roundtrip preserves all fields`() {
         val list = listOf(
-            OverlayWidget("cmd:0", WidgetKind.COMMAND, commandId = 0, label = "名刀", sizeDp = 56, alphaPercent = 88, fx = 0.92f, fy = 0.28f, enabled = true, locked = false),
+            OverlayWidget("cmd:0", WidgetKind.COMMAND, commandId = 0, label = "旧固定指令", sizeDp = 56, alphaPercent = 88, fx = 0.92f, fy = 0.28f, enabled = true, locked = false),
             OverlayWidget("macro:1001", WidgetKind.MACRO, macroId = 1001, label = "连招三", sizeDp = 40, alphaPercent = 60, fx = 0.05f, fy = 0.85f, enabled = false, locked = true),
         )
         val decoded = OverlayCodec.decodeWidgets(OverlayCodec.encodeWidgets(list))
@@ -45,13 +47,13 @@ class OverlayCodecTest {
     }
 
     @Test
-    fun `macros roundtrip preserves steps`() {
+    fun `macros v2 roundtrip preserves tap swipe and delay`() {
         val macro = MacroConfig(
             macroId = 1001,
             name = "连招三",
             steps = listOf(
-                ExecStep.Tap(900, 2100),
-                ExecStep.Wait(300),
+                ExecStep.Tap(900, 2100, delayAfterMs = 120L),
+                ExecStep.Swipe(100, 200, 760, 1750, durationMs = 420, delayAfterMs = 80L),
                 ExecStep.Tap(760, 1750),
                 ExecStep.Verify("ignored"),
             ),
@@ -61,7 +63,52 @@ class OverlayCodecTest {
         assertEquals(1001L, decoded.macroId)
         assertEquals("连招三", decoded.name)
         assertEquals(
-            listOf(ExecStep.Tap(900, 2100), ExecStep.Wait(300), ExecStep.Tap(760, 1750)),
+            listOf(
+                ExecStep.Tap(900, 2100, delayAfterMs = 120L),
+                ExecStep.Swipe(100, 200, 760, 1750, durationMs = 420, delayAfterMs = 80L),
+                ExecStep.Tap(760, 1750),
+            ),
+            decoded.steps,
+        )
+    }
+
+    @Test
+    fun `macros v3 roundtrip preserves multi gesture tracks`() {
+        val gesture = ExecStep.MultiGesture(
+            pointers = listOf(
+                GesturePointer(
+                    listOf(
+                        GesturePoint(300, 400, 0L),
+                        GesturePoint(320, 430, 120L),
+                    ),
+                ),
+                GesturePointer(
+                    listOf(
+                        GesturePoint(800, 900, 20L),
+                        GesturePoint(760, 880, 100L),
+                    ),
+                ),
+            ),
+            durationMs = 160,
+            delayAfterMs = 240L,
+            devicePath = "/dev/input/event5",
+            panelMaxX = 1079,
+            panelMaxY = 2339,
+            rotation = 1,
+        )
+        val macro = MacroConfig(2002L, "双指", listOf(gesture), createdAt = 9L)
+
+        val decoded = OverlayCodec.decodeMacros(OverlayCodec.encodeMacros(listOf(macro))).single()
+
+        assertEquals(gesture, decoded.steps.single())
+    }
+
+    @Test
+    @Suppress("DEPRECATION")
+    fun `legacy wait and two field tap are still readable`() {
+        val decoded = OverlayCodec.decodeMacros("7|旧宏:900,2100~w300").single()
+        assertEquals(
+            listOf(ExecStep.Tap(900, 2100), ExecStep.Wait(300L)),
             decoded.steps,
         )
     }

@@ -1,24 +1,51 @@
 package com.aixiaohuadb.ui.overlay
 
 import androidx.lifecycle.ViewModel
+import androidx.lifecycle.viewModelScope
+import com.aixiaohuadb.di.AppContainer
 import com.aixiaohuadb.service.BallConfig
 import com.aixiaohuadb.service.ControlMode
 import com.aixiaohuadb.service.MacroConfig
 import com.aixiaohuadb.service.OverlayStore
 import com.aixiaohuadb.service.OverlayWidget
+import com.aixiaohuadb.voice.VoiceStartReason
+import com.aixiaohuadb.voice.VoiceStopReason
 import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.launch
 
-/** 悬浮控制设置页：球配置 + 按钮列表 + 宏列表 + 待命名宏 + 添加入口，与悬浮服务共享 OverlayStore */
-class OverlayControlViewModel : ViewModel() {
+/** 悬浮控制设置页：球配置 + 按钮列表 + 宏列表 + 语音槽位绑定，与悬浮服务共享 OverlayStore */
+class OverlayControlViewModel(private val container: AppContainer) : ViewModel() {
     val widgets: StateFlow<List<OverlayWidget>> = OverlayStore.widgets
     val ball: StateFlow<BallConfig> = OverlayStore.ball
     val macros: StateFlow<List<MacroConfig>> = OverlayStore.macros
     val pendingMacro: StateFlow<MacroConfig?> = OverlayStore.pendingMacro
     val controlMode: StateFlow<ControlMode> = OverlayStore.controlMode
+    val voiceEnabled: StateFlow<Boolean> = container.voiceLifecycle.voiceEnabled
+    val voiceState = container.voiceLifecycle.state
+    val bindings = container.macroBindingStore.bindings
 
     fun setControlMode(mode: ControlMode) = OverlayStore.setControlMode(mode)
 
-    fun addPreset(commandId: Int, label: String) = OverlayStore.addPreset(commandId, label)
+    fun requestVoiceEnable(onResult: (Boolean) -> Unit) = viewModelScope.launch {
+        val result = container.voiceLifecycle.enable(VoiceStartReason.OVERLAY_SWITCH)
+        onResult(result.isSuccess)
+    }
+
+    fun toggleVoice(enabled: Boolean) = viewModelScope.launch {
+        if (enabled) container.voiceLifecycle.enable(VoiceStartReason.SETTINGS_TOGGLE)
+        else {
+            container.voiceLifecycle.disable(VoiceStopReason.SETTINGS_TOGGLE)
+            if (OverlayStore.controlMode.value == ControlMode.VOICE) {
+                OverlayStore.setControlMode(ControlMode.ACCESSIBILITY)
+            }
+        }
+    }
+
+    fun bind(slot: Int, macroId: Long, phrase: String) = viewModelScope.launch {
+        container.macroBindingStore.bind(slot, macroId, phrase)
+    }
+
+    fun unbind(slot: Int) = viewModelScope.launch { container.macroBindingStore.unbind(slot) }
 
     fun removeWidget(id: String) = OverlayStore.removeWidget(id)
 

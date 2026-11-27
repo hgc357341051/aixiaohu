@@ -17,10 +17,11 @@ import kotlinx.coroutines.flow.asSharedFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.launch
 
-/** 10 个机态 + C1 真退出过渡态 */
+/** 10 个机态 + C1 真退出过渡态 + 语音物理销毁后的 DISABLED 末位态 */
 enum class VoiceState {
     IDLE, LISTEN, VERIFY, CMD_WINDOW, EXECUTE, COOLDOWN,
     PAUSED, RECOG_OFF, MANUAL_SILENT, ERROR, UNLOAD_WAKE,
+    DISABLED,
 }
 
 sealed class VoiceEvent {
@@ -61,7 +62,10 @@ sealed class SideEffect {
  * 不变式：MANUAL_SILENT 下除 ManualResume / ExitGame 外忽略一切事件；
  * C1 执行时先 emit UnloadModels + StopCapture，再进入 MANUAL_SILENT。
  */
-class VoiceStateMachine(private val configProvider: () -> AppConfig = { AppConfig.DEFAULT }) {
+class VoiceStateMachine(
+    private val configProvider: () -> AppConfig = { AppConfig.DEFAULT },
+    private val commandNameProvider: (Int) -> String = { "宏 $it" },
+) {
     constructor(config: AppConfig) : this({ config })
 
     private val config: AppConfig get() = configProvider()
@@ -99,8 +103,23 @@ class VoiceStateMachine(private val configProvider: () -> AppConfig = { AppConfi
         transition(VoiceState.LISTEN)
     }
 
+    /**
+     * 语音物理销毁：清 timer / pendingC1 / errorCount，只留下 DISABLED 空操作态。
+     * 不 emit 任何 SideEffect，避免已关闭的语音链路被副作用重新拉起。
+     */
+    fun enterDisabled() = synchronized(lock) {
+        timer?.cancel()
+        timer = null
+        pendingC1 = false
+        errorCount = 0
+        c1ConfirmedOnce = false
+        _state.value = VoiceState.DISABLED
+    }
+
     fun send(event: VoiceEvent) = synchronized(lock) {
         val current = _state.value
+        // DISABLED 吸收一切事件（含 ManualResume / C4 自恢复）
+        if (current == VoiceState.DISABLED) return
         if (current == VoiceState.MANUAL_SILENT &&
             event !is VoiceEvent.ManualResume && event !is VoiceEvent.ExitGame
         ) {
@@ -131,7 +150,7 @@ class VoiceStateMachine(private val configProvider: () -> AppConfig = { AppConfi
             VoiceState.RECOG_OFF -> handleRecogOff(event)
             VoiceState.MANUAL_SILENT -> handleManualSilent(event)
             VoiceState.ERROR -> handleErrorState(event)
-            VoiceState.UNLOAD_WAKE -> Unit
+            VoiceState.UNLOAD_WAKE, VoiceState.DISABLED -> Unit
         }
     }
 
@@ -371,18 +390,8 @@ class VoiceStateMachine(private val configProvider: () -> AppConfig = { AppConfi
         }
     }
 
-    private fun commandName(id: Int): String = when (id) {
-        0 -> "换名刀"
-        1 -> "换复活甲"
-        2 -> "换辉月"
-        3 -> "换吸血书"
-        4 -> "换吸血刀"
-        5 -> "换冰甲"
-        6 -> "换血魔"
-        in 7..12 -> "换${id - 6}号位"
-        13 -> "切换位置"
-        else -> "未识别"
-    }
+    /** 指令名来自用户宏绑定（slot → phrase）；推理层/Demo/TFLite 不感知宏 */
+    private fun commandName(id: Int): String = commandNameProvider(id)
 
     // ---------------- 基础工具 ----------------
 

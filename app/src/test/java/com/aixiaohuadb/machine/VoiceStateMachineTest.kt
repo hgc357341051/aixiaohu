@@ -170,6 +170,32 @@ class VoiceStateMachineTest {
     }
 
     @Test
+    fun `DISABLED 吸收所有事件且不发副作用`() = runTest {
+        val sm = VoiceStateMachine(testConfig())
+        val effects = mutableListOf<SideEffect>()
+        collectEffects(sm, effects)
+
+        sm.enterDisabled()
+        assertEquals(VoiceState.DISABLED, sm.currentState())
+        val baseline = effects.size
+
+        val result = CommandResult(ActionLabel.A0_SWAP, ObjectLabel.E0_MINGDAO, 0, 0.95f)
+        listOf(
+            VoiceEvent.Start,
+            VoiceEvent.CoarseHit,
+            VoiceEvent.WakeVerified(1f),
+            VoiceEvent.CommandDetected(result, 1f),
+            VoiceEvent.ControlDetected(ControlWord.C4_RESUME, 1f),
+            VoiceEvent.ManualResume,
+            VoiceEvent.Error(IllegalStateException("ignored")),
+        ).forEach(sm::send)
+
+        assertEquals(VoiceState.DISABLED, sm.currentState())
+        assertEquals(baseline, effects.size)
+        sm.close()
+    }
+
+    @Test
     fun `声纹拒绝回监听态且游戏离前台回待机`() = runTest {
         val sm = VoiceStateMachine(testConfig())
         sm.send(VoiceEvent.Start)

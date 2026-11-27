@@ -1,0 +1,5 @@
+<?xml version="1.0" encoding="utf-8"?>
+<paths>
+    <!-- 只放开单帧截图缓存目录；filesDir 内含 ADB 私钥与审计日志，绝不暴露 -->
+    <cache-path name="snapshot" path="snapshot/" />
+</paths>

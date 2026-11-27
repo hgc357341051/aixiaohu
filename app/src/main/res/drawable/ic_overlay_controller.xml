@@ -1,0 +1,38 @@
+<?xml version="1.0" encoding="utf-8"?>
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="48dp"
+    android:height="48dp"
+    android:viewportWidth="48"
+    android:viewportHeight="48">
+    <!-- 半透明底盘 -->
+    <path
+        android:pathData="M24,2 A22,22 0 1 0 24,46 A22,22 0 1 0 24,2 Z"
+        android:fillColor="#335EEAD4" />
+    <!-- 十字方向键 -->
+    <path
+        android:pathData="M18,20h12v8H18z M20,18h8v12h-8z"
+        android:fillColor="#5EEAD4" />
+    <!-- 中心点 -->
+    <path
+        android:pathData="M24,20.5a3.5,3.5 0 1 0 0,7 a3.5,3.5 0 1 0 0,-7z"
+        android:fillColor="#0E7490" />
+    <!-- 三条音波弧 -->
+    <path
+        android:pathData="M15,14 Q11,24 15,34"
+        android:fillColor="@android:color/transparent"
+        android:strokeColor="#22D3EE"
+        android:strokeWidth="2"
+        android:strokeLineCap="round" />
+    <path
+        android:pathData="M11,10 Q4,24 11,38"
+        android:fillColor="@android:color/transparent"
+        android:strokeColor="#22D3EE"
+        android:strokeWidth="2"
+        android:strokeLineCap="round" />
+    <path
+        android:pathData="M33,14 Q37,24 33,34"
+        android:fillColor="@android:color/transparent"
+        android:strokeColor="#22D3EE"
+        android:strokeWidth="2"
+        android:strokeLineCap="round" />
+</vector>

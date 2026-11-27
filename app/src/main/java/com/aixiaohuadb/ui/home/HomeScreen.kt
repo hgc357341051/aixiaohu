@@ -45,6 +45,7 @@ import com.aixiaohuadb.ui.theme.Brand
 import com.aixiaohuadb.ui.theme.BrandSoft
 import com.aixiaohuadb.ui.theme.Muted
 import com.aixiaohuadb.ui.theme.Spacing
+import com.aixiaohuadb.voice.VoiceLifecycleState
 
 @Composable
 fun HomeScreen(
@@ -58,6 +59,8 @@ fun HomeScreen(
 ) {
     var gateExpanded by remember { mutableStateOf(false) }
     val logs = uiState.logs
+    val voiceRunning = uiState.voiceLifecycle == VoiceLifecycleState.RUNNING ||
+        uiState.voiceLifecycle == VoiceLifecycleState.PAUSED
 
     val rawInfo = uiState.voiceState.ui()
     // 执行态标题不得固定「换名刀」：UiState 无当前指令字段，统一改为中性安全文案
@@ -123,27 +126,37 @@ fun HomeScreen(
         StateCard(info)
 
         Spacer(Modifier.height(Spacing.md))
-        PrimaryButton(text = "开启 3s 指令窗", onClick = onOpenWindow)
+        when (uiState.voiceLifecycle) {
+            // STOPPED 不是第三个语音启动入口：只提示并跳设置页
+            VoiceLifecycleState.STOPPED ->
+                PrimaryButton(text = "语音未开启 · 去设置开启", onClick = { onTab("settings") })
+            VoiceLifecycleState.DISABLED, VoiceLifecycleState.DESTROYING, VoiceLifecycleState.STARTING ->
+                PrimaryButton(text = "语音已关闭 · 去设置", onClick = { onTab("settings") })
+            VoiceLifecycleState.RUNNING, VoiceLifecycleState.PAUSED ->
+                PrimaryButton(text = "开启 3s 指令窗", onClick = onOpenWindow)
+        }
 
         Spacer(Modifier.height(Spacing.sm))
         Row(modifier = Modifier.fillMaxWidth()) {
             SecondaryAction(
-                text = "暂停语音",
+                text = if (voiceRunning) "暂停语音" else "语音未开启",
                 icon = Icons.Filled.PauseCircle,
                 modifier = Modifier.weight(1f),
+                enabled = voiceRunning,
                 onClick = onPause,
             )
             Spacer(Modifier.width(Spacing.sm))
             SecondaryAction(
-                text = "退出唤醒",
+                text = if (voiceRunning) "退出唤醒" else "语音未开启",
                 icon = Icons.Filled.PowerOff,
                 modifier = Modifier.weight(1f),
                 tone = Tone.DANGER,
+                enabled = voiceRunning,
                 onClick = onExit,
             )
         }
 
-        if (uiState.voiceState == VoiceState.MANUAL_SILENT) {
+        if (uiState.voiceState == VoiceState.MANUAL_SILENT && voiceRunning) {
             Spacer(Modifier.height(Spacing.sm))
             PrimaryButton(
                 text = "手动恢复语音（悬浮球 / 通知 / 设置均可）",
@@ -234,6 +247,7 @@ private fun SecondaryAction(
     icon: androidx.compose.ui.graphics.vector.ImageVector,
     modifier: Modifier = Modifier,
     tone: Tone = Tone.BRAND,
+    enabled: Boolean = true,
     onClick: () -> Unit,
 ) {
     val fg = when (tone) {
@@ -246,6 +260,7 @@ private fun SecondaryAction(
     }
     androidx.compose.material3.Button(
         onClick = onClick,
+        enabled = enabled,
         modifier = modifier.height(46.dp),
         colors = androidx.compose.material3.ButtonDefaults.buttonColors(
             containerColor = bg,

@@ -16,9 +16,11 @@ import androidx.compose.material.icons.filled.Link
 import androidx.compose.material.icons.filled.LinkOff
 import androidx.compose.material.icons.filled.Security
 import androidx.compose.material.icons.filled.Terminal
+import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
@@ -171,6 +173,59 @@ fun AdbScreen(
             s.probeResult?.let { ProbeResult(it) }
         }
 
+        SectionTitle(text = "前台长连接")
+        SectionCard(icon = Icons.Filled.Link, title = "桥接状态", tone = Tone.INFO) {
+            EnvRow("桥接阶段", s.bridge.phase.name)
+            EnvRow("最近心跳", if (s.bridge.heartbeatOk) "正常" else "未通过")
+            EnvRow("连接端点", s.bridge.endpoint ?: "未连接")
+            EnvRow("排队命令", s.bridge.queued.toString())
+            EnvRow("重连次数", s.bridge.retryCount.toString())
+            s.bridge.message?.let { msg ->
+                Text(msg, style = MaterialTheme.typography.labelSmall, color = Danger)
+            }
+        }
+
+        SectionTitle(text = "raw shell（风险自负）")
+        SectionCard(icon = Icons.Filled.Terminal, title = "自定义命令", tone = Tone.WARN) {
+            Text(
+                "所有 flavor 均可发送任意 shell，风险自负。每条命令都会展示原文并要求显式确认；" +
+                    "常见不可逆命令拦截（可能不全），审计日志不可关闭。",
+                style = MaterialTheme.typography.labelSmall,
+                color = Muted,
+            )
+            Spacer(Modifier.height(Spacing.sm))
+            OutlinedTextField(
+                value = s.rawCommand,
+                onValueChange = vm::onRawCommand,
+                label = { Text("shell 原文，例如：input keyevent 3") },
+                singleLine = true,
+                modifier = Modifier.fillMaxWidth(),
+            )
+            PrimaryButton(text = "发送 raw shell", onClick = vm::requestRaw, enabled = !s.busy)
+            s.rawResult?.let {
+                Spacer(Modifier.height(Spacing.xs))
+                Text(it, style = MaterialTheme.typography.labelSmall, color = Muted)
+            }
+        }
+
+        SectionTitle(text = "审计日志（最近 ${s.audit.size} 条）")
+        InfoCard {
+            if (s.audit.isEmpty()) {
+                Text("暂无 raw shell 审计记录", style = MaterialTheme.typography.labelSmall, color = Muted)
+            } else {
+                s.audit.forEach { entry ->
+                    Text(
+                        "${entry.time} · ${entry.decision} · ${entry.source} · ${if (entry.ok) "OK" else "FAIL"}",
+                        style = MaterialTheme.typography.labelSmall,
+                        color = Muted,
+                    )
+                    Text(entry.command, style = MaterialTheme.typography.bodySmall)
+                    Spacer(Modifier.height(Spacing.xs))
+                }
+                QuietButton(text = "刷新审计", onClick = vm::refreshAudit)
+            }
+        }
+
         SectionTitle(text = "真机环境")
         InfoCard {
             Column {
@@ -180,6 +235,24 @@ fun AdbScreen(
                 EnvRow("当前连接端点", s.status.endpointLabel ?: "未连接")
                 EnvRow("已配对端点", s.status.pairedLabel ?: "尚未配对")
             }
+        }
+
+        s.pendingRaw?.let { req ->
+            AlertDialog(
+                onDismissRequest = vm::cancelRaw,
+                title = { Text("确认执行 raw shell") },
+                text = {
+                    Column {
+                        Text("将向已连接的设备发送以下命令：", style = MaterialTheme.typography.bodySmall)
+                        Spacer(Modifier.height(Spacing.xs))
+                        Text(req.command, style = MaterialTheme.typography.bodySmall)
+                        Spacer(Modifier.height(Spacing.xs))
+                        Text("来源：${req.source.name} · 超时 ${req.timeoutMs}ms", style = MaterialTheme.typography.labelSmall, color = Muted)
+                    }
+                },
+                confirmButton = { TextButton(onClick = vm::confirmRaw) { Text("确认执行") } },
+                dismissButton = { TextButton(onClick = vm::cancelRaw) { Text("取消") } },
+            )
         }
 
         WarningCard("仅限自有设备与测试环境使用。模拟点击可能违反应用或游戏条款，风险自担；本应用不内置任何提权组件，也不读取设备私有数据。")

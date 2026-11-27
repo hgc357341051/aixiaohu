@@ -48,16 +48,19 @@ import com.aixiaohuadb.ui.theme.PanelMuted
 import com.aixiaohuadb.ui.theme.Spacing
 import com.aixiaohuadb.ui.theme.Warn
 import com.aixiaohuadb.ui.theme.WarnBg
+import com.aixiaohuadb.voice.VoiceLifecycleState
 
 /** 通知栏覆盖层：原型 shade，提供暂停 / 退出 / 恢复入口 */
 @Composable
 fun NotificationShade(
     info: UiStateInfo,
+    lifecycle: VoiceLifecycleState,
     onPause: () -> Unit,
     onExit: () -> Unit,
     onResume: () -> Unit,
     onDismiss: () -> Unit,
 ) {
+    val voiceRunning = lifecycle == VoiceLifecycleState.RUNNING || lifecycle == VoiceLifecycleState.PAUSED
     Box(
         modifier = Modifier
             .fillMaxSize()
@@ -71,9 +74,12 @@ fun NotificationShade(
                 .padding(start = Spacing.lg, end = Spacing.lg, top = 44.dp)
                 .clickable(enabled = false) {},
         ) {
-            NotificationCard(info, onPause, onExit, onResume)
+            NotificationCard(info, voiceRunning, onPause, onExit, onResume)
             Spacer(Modifier.height(Spacing.sm))
-            NotificationHint("退出唤醒后，点悬浮球 / 通知栏可手动恢复")
+            NotificationHint(
+                if (voiceRunning) "退出唤醒后，点悬浮球 / 通知栏可手动恢复"
+                else "语音已关闭 · 无后台监听，需在设置或悬浮面板开启"
+            )
             Spacer(Modifier.height(Spacing.md))
             OutlinedButton(onClick = onDismiss, modifier = Modifier.fillMaxWidth()) { Text("收起通知栏") }
             Text(
@@ -90,7 +96,13 @@ fun NotificationShade(
 }
 
 @Composable
-private fun NotificationCard(info: UiStateInfo, onPause: () -> Unit, onExit: () -> Unit, onResume: () -> Unit) {
+private fun NotificationCard(
+    info: UiStateInfo,
+    voiceRunning: Boolean,
+    onPause: () -> Unit,
+    onExit: () -> Unit,
+    onResume: () -> Unit,
+) {
     Card(
         modifier = Modifier.fillMaxWidth(),
         shape = LgShape,
@@ -102,36 +114,42 @@ private fun NotificationCard(info: UiStateInfo, onPause: () -> Unit, onExit: () 
             Spacer(Modifier.width(Spacing.md))
             Column(Modifier.weight(1f)) {
                 Text("小胡 · 语音控制", style = MaterialTheme.typography.bodySmall)
-                Text("前台服务运行中", style = MaterialTheme.typography.labelSmall, color = Muted)
+                Text(
+                    if (voiceRunning) "语音服务运行中" else "语音已关闭 · 无后台监听",
+                    style = MaterialTheme.typography.labelSmall, color = Muted,
+                )
                 Spacer(Modifier.height(Spacing.xs))
                 StatusBadge(text = info.notif, tone = Tone.BRAND)
             }
         }
         Row(modifier = Modifier.fillMaxWidth().padding(horizontal = Spacing.md)) {
             ShadeAction(
-                text = "暂停",
+                text = if (voiceRunning) "暂停" else "未开启",
                 icon = Icons.Filled.PauseCircle,
                 container = WarnBg,
                 content = Warn,
                 modifier = Modifier.weight(1f),
+                enabled = voiceRunning,
                 onClick = onPause,
             )
             Spacer(Modifier.width(Spacing.sm))
             ShadeAction(
-                text = "退出",
+                text = if (voiceRunning) "退出" else "未开启",
                 icon = Icons.Filled.PowerOff,
                 container = DangerBg,
                 content = Danger,
                 modifier = Modifier.weight(1f),
+                enabled = voiceRunning,
                 onClick = onExit,
             )
             Spacer(Modifier.width(Spacing.sm))
             ShadeAction(
-                text = "恢复",
+                text = if (voiceRunning) "恢复" else "未开启",
                 icon = Icons.Filled.Restore,
                 container = BrandSoft,
                 content = Brand,
                 modifier = Modifier.weight(1f),
+                enabled = voiceRunning,
                 onClick = onResume,
             )
         }
@@ -146,10 +164,12 @@ private fun ShadeAction(
     container: androidx.compose.ui.graphics.Color,
     content: androidx.compose.ui.graphics.Color,
     modifier: Modifier = Modifier,
+    enabled: Boolean = true,
     onClick: () -> Unit,
 ) {
     Button(
         onClick = onClick,
+        enabled = enabled,
         modifier = modifier.height(44.dp),
         colors = ButtonDefaults.buttonColors(containerColor = container, contentColor = content),
         shape = ButtonShape,

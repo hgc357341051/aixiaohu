@@ -17,12 +17,13 @@ class LabelBookTest {
     }
 
     @Test
-    fun `十五条指令标签齐全`() {
+    fun `十五条指令标签只是槽位提示 且14为拒识槽`() {
         assertEquals(15, LabelBook.commandLabels.size)
-        assertEquals("换名刀", LabelBook.labelOf(0))
-        assertEquals("换6号位", LabelBook.labelOf(12))
-        assertEquals("切换位置", LabelBook.labelOf(13))
-        assertEquals("CMD_OTHER_UNKNOWN", LabelBook.labelOf(14))
+        assertEquals("槽位 1", LabelBook.labelOf(0))
+        assertEquals("槽位 13", LabelBook.labelOf(12))
+        assertEquals("槽位 14", LabelBook.labelOf(13))
+        assertEquals("拒识", LabelBook.labelOf(14))
+        assertEquals("CMD_OTHER_UNKNOWN", LabelBook.labelOf(99))
     }
 
     @Test

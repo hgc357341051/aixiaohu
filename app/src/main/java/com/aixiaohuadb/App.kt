@@ -11,9 +11,10 @@ class App : Application() {
     override fun onCreate() {
         super.onCreate()
         container = AppContainer(this)
+        // 先注册模式副作用钩子，再初始化容器：消除冷启动隐式顺序依赖，
+        // OverlayStore.init 恢复模式时钩子必定已就位，只收敛内存状态不启动服务。
+        OverlayStore.setModeApplier { mode, fromRestore -> container.applyControlMode(mode, fromRestore) }
         container.initialize()
-        // 先注册模式副作用钩子，再加载配置：init 恢复 MANUAL 模式时需立即真实停麦
-        OverlayStore.setModeApplier { mode -> container.applyControlMode(mode) }
         // 悬浮控制中心配置提前加载（含旧 quick_buttons 数据迁移），Service 与设置页共享
         OverlayStore.init(this)
     }

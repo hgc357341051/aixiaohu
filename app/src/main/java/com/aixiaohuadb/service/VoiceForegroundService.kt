@@ -15,8 +15,9 @@ import com.aixiaohuadb.inference.api.ControlWord
 import com.aixiaohuadb.machine.VoiceEvent
 import com.aixiaohuadb.machine.ui
 import com.aixiaohuadb.ui.MainActivity
+import com.aixiaohuadb.voice.VoiceAction
 
-/** 常驻通知：展示当前机态，并提供暂停 / 退出 / 恢复手动入口 */
+/** 常驻通知：仅语音生命周期 RUNNING/PAUSED 时允许存在 */
 class VoiceForegroundService : Service() {
     companion object {
         const val CHANNEL_ID = "voice_ctl_channel"
@@ -37,19 +38,37 @@ class VoiceForegroundService : Service() {
                 context.startService(intent)
             }
         }
+
+        /** 物理停止常驻通知；onDestroy 中还会 cancel 一次兜底 */
+        fun stop(context: Context) {
+            runCatching { context.stopService(Intent(context, VoiceForegroundService::class.java)) }
+            context.getSystemService(NotificationManager::class.java)?.cancel(NOTIFICATION_ID)
+        }
     }
 
     private val container get() = (application as App).container
 
     override fun onCreate() {
         super.onCreate()
+        // sticky / 后台复活 / disable 后残留的 start 请求一律不进入 startForeground
+        if (!container.voiceLifecycle.isVoiceActionAllowed(VoiceAction.FOREGROUND_START)) {
+            stopSelf()
+            return
+        }
         runningInstance = this
         createChannel()
         startForeground(NOTIFICATION_ID, buildNotification())
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
-        when (intent?.action) {
+        // intent==null 是 START_STICKY 重启路径；无论哪种来源都要过生命周期守卫
+        if (intent == null ||
+            !container.voiceLifecycle.isVoiceActionAllowed(VoiceAction.VOICE_NOTIFICATION_ACTION)
+        ) {
+            stopSelf()
+            return START_NOT_STICKY
+        }
+        when (intent.action) {
             ACTION_PAUSE -> container.stateMachine.send(
                 VoiceEvent.ControlDetected(ControlWord.C3_PAUSE, 1f),
             )
@@ -57,14 +76,20 @@ class VoiceForegroundService : Service() {
                 VoiceEvent.ControlDetected(ControlWord.C1_EXIT_WAKE, 1f),
             )
             ACTION_RESUME -> container.stateMachine.send(VoiceEvent.ManualResume)
-            else -> container.stateMachine.send(VoiceEvent.Start)
+            else -> Unit
         }
-        startForeground(NOTIFICATION_ID, buildNotification())
-        return START_STICKY
+        if (container.voiceLifecycle.isVoiceActionAllowed(VoiceAction.FOREGROUND_START)) {
+            startForeground(NOTIFICATION_ID, buildNotification())
+        } else {
+            stopSelf()
+        }
+        return START_NOT_STICKY
     }
 
     override fun onDestroy() {
         if (runningInstance === this) runningInstance = null
+        // 兜底：即使 stopService 被系统拦截，通知也不再残留
+        getSystemService(NotificationManager::class.java)?.cancel(NOTIFICATION_ID)
         super.onDestroy()
     }
 
@@ -72,6 +97,10 @@ class VoiceForegroundService : Service() {
 
     /** 状态变化时由 AppViewModel 调用刷新通知文案 */
     fun refresh() {
+        if (!container.voiceLifecycle.isVoiceActionAllowed(VoiceAction.FOREGROUND_START)) {
+            stopSelf()
+            return
+        }
         val manager = getSystemService(NotificationManager::class.java)
         manager?.notify(NOTIFICATION_ID, buildNotification())
     }
@@ -97,7 +126,7 @@ class VoiceForegroundService : Service() {
         val exit = PendingIntent.getService(this, 2, actionIntent(ACTION_EXIT), flags)
         val resume = PendingIntent.getService(this, 3, actionIntent(ACTION_RESUME), flags)
         return Notification.Builder(this, CHANNEL_ID)
-            .setSmallIcon(R.drawable.ic_launcher_foreground)
+            .setSmallIcon(R.drawable.ic_overlay_controller_silhouette)
             .setContentTitle("小胡 · 语音控制")
             .setContentText(info.notif)
             .setContentIntent(open)

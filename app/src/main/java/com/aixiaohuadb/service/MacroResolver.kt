@@ -3,8 +3,8 @@ package com.aixiaohuadb.service
 import com.aixiaohuadb.exec.CommandAction
 
 /**
- * 宏 → 执行动作：不经过 CommandLibrary.actionFor（其 fallback 会把未知 id 映射为"未识别"），
- * 直接构造 CommandAction，id = 1000 + macroId 与预置 0~14 完全隔离。
+ * 宏 → 执行动作：直接构造 CommandAction，不存在固定指令的 fallback，
+ * id = 1000 + macroId 与历史预置 0~14 完全隔离。
  */
 object MacroResolver {
     fun buildCommandAction(macro: MacroConfig): CommandAction =

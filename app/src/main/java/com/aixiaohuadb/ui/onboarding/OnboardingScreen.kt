@@ -134,8 +134,8 @@ fun OnboardingScreen(onNext: () -> Unit, onSkip: () -> Unit) {
                     )
                     FeatureLine(
                         icon = Icons.Filled.Timer,
-                        title = "14 类指令，3 秒窗口",
-                        desc = "换名刀 / 复活甲 / 1–6 号位 / 切换位置",
+                        title = "15 个槽位，3 秒窗口",
+                        desc = "把识别槽位绑定到你录制的宏，说法由你自定义",
                     )
                     FeatureLine(
                         icon = Icons.Filled.PhoneAndroid,
@@ -148,7 +148,7 @@ fun OnboardingScreen(onNext: () -> Unit, onSkip: () -> Unit) {
             WarningCard("代操作风险提示：模拟点击可能违反游戏协议导致封号。仅限自有设备与测试账号、学习研究使用，不发布、不牟利，风险自担。")
             PrimaryButton(text = "下一步 · 权限说明", onClick = onNext)
             Spacer(Modifier.height(Spacing.sm))
-            SecondaryButton(text = "暂不开启 · 用手动模式", onClick = onSkip)
+            SecondaryButton(text = "暂不开启 · 用无障碍模式", onClick = onSkip)
         }
     }
 }

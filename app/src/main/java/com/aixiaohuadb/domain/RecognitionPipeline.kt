@@ -9,6 +9,9 @@ import com.aixiaohuadb.inference.api.ControlWord
 import com.aixiaohuadb.machine.VoiceEvent
 import com.aixiaohuadb.machine.VoiceState
 import com.aixiaohuadb.machine.VoiceStateMachine
+import com.aixiaohuadb.macro.MacroBindingStore
+import com.aixiaohuadb.macro.VoiceMacroBinding
+import com.aixiaohuadb.voice.VoicePipeline
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -26,7 +29,8 @@ class RecognitionPipeline(
     private val stateMachine: VoiceStateMachine,
     private val configProvider: () -> AppConfig,
     private val onMetrics: (VoiceMetrics) -> Unit,
-) {
+    private val bindingStore: MacroBindingStore? = null,
+) : VoicePipeline {
     private val wakeWindow = FeatureWindow(400)
     private val cmdWindow = FeatureWindow(1280)
     private val spkWindow = FeatureWindow(192)
@@ -36,8 +40,8 @@ class RecognitionPipeline(
     private var wakeHits = 0
     private var lastRejectMs = 0L
 
-    /** AppContainer.initialize 调用一次，避免重复收集同一条 SharedFlow。 */
-    fun start(scope: CoroutineScope) {
+    /** 仅由 VoiceLifecycleController 调用 */
+    override fun start(scope: CoroutineScope) {
         if (job?.isActive == true) return
         job = scope.launch {
             audioCapture.frames.collect { frame ->
@@ -51,12 +55,12 @@ class RecognitionPipeline(
         }
     }
 
-    fun stop() {
+    override fun stop() {
         job?.cancel()
         job = null
     }
 
-    fun reset() {
+    override fun reset() {
         wakeWindow.reset()
         cmdWindow.reset()
         spkWindow.reset()
@@ -126,14 +130,17 @@ class RecognitionPipeline(
         val now = System.currentTimeMillis()
         val threshold = config.decode.tauCmd + config.thresholdOffset
         val command = outcome.command
-        val commandHit = command != null && command.commandId != 14 && command.score >= threshold
+        val commandHit = command?.takeIf { c ->
+            c.commandId in VoiceMacroBinding.MIN_SLOT..VoiceMacroBinding.MAX_SLOT &&
+                c.score >= threshold && bindingStore?.resolve(c) != null
+        }
         val speakerRejected = outcome.speakerEnabled && !outcome.speakerOk
 
         when {
             speakerRejected -> sendRejected(now)
             outcome.control != ControlWord.C0_NONE ->
                 stateMachine.send(VoiceEvent.ControlDetected(outcome.control, outcome.controlScore))
-            commandHit -> stateMachine.send(VoiceEvent.CommandDetected(command!!, command.score))
+            commandHit != null -> stateMachine.send(VoiceEvent.CommandDetected(commandHit, commandHit.score))
             else -> sendRejected(now)
         }
 

@@ -21,6 +21,7 @@ import androidx.lifecycle.ViewModel
 import androidx.lifecycle.ViewModelProvider
 import androidx.lifecycle.viewmodel.compose.viewModel
 import androidx.navigation.NavHostController
+import androidx.navigation.NavOptionsBuilder
 import androidx.navigation.compose.NavHost
 import androidx.navigation.compose.composable
 import androidx.navigation.compose.rememberNavController
@@ -28,9 +29,13 @@ import com.aixiaohuadb.BuildConfig
 import com.aixiaohuadb.di.AppContainer
 import com.aixiaohuadb.machine.VoiceState
 import com.aixiaohuadb.machine.ui
+import com.aixiaohuadb.ui.adb.AdbScreen
+import com.aixiaohuadb.ui.adb.AdbViewModel
 import com.aixiaohuadb.ui.debug.DebugScreen
 import com.aixiaohuadb.ui.debug.DebugViewModel
 import com.aixiaohuadb.ui.home.HomeScreen
+import com.aixiaohuadb.ui.macro.SnapshotAnnotationScreen
+import com.aixiaohuadb.ui.macro.SnapshotAnnotationViewModel
 import com.aixiaohuadb.ui.mapping.MappingScreen
 import com.aixiaohuadb.ui.mapping.MappingViewModel
 import com.aixiaohuadb.ui.onboarding.OnboardingScreen
@@ -40,8 +45,6 @@ import com.aixiaohuadb.ui.panel.PanelScreen
 import com.aixiaohuadb.ui.permissions.PermissionsScreen
 import com.aixiaohuadb.ui.settings.SettingsScreen
 import com.aixiaohuadb.ui.settings.SettingsViewModel
-import com.aixiaohuadb.ui.adb.AdbScreen
-import com.aixiaohuadb.ui.adb.AdbViewModel
 import com.aixiaohuadb.ui.theme.Panel
 import com.aixiaohuadb.ui.theme.PanelInk
 import com.aixiaohuadb.ui.theme.PillShape
@@ -49,12 +52,31 @@ import com.aixiaohuadb.ui.voiceprint.VoiceprintScreen
 import com.aixiaohuadb.ui.voiceprint.VoiceprintViewModel
 import kotlinx.coroutines.delay
 
-/** 单 Activity 导航图：9 个 destination + home/{state} 参数化承载 7 态 */
+/** 单 Activity 导航图：10 个 destination + home/{state} 参数化承载机态 */
 @Composable
-fun AppNavHost(vm: AppViewModel, container: AppContainer, context: Context) {
+fun AppNavHost(
+    vm: AppViewModel,
+    container: AppContainer,
+    context: Context,
+    snapshotUri: String? = null,
+) {
     val nav = rememberNavController()
     val uiState by vm.ui.collectAsState()
     var shadeOpen by remember { mutableStateOf(false) }
+
+    // 面板 / 映射 / 悬浮设置共用同一 ViewModel，避免 OverlayStore 多实例观察不一致。
+    val overlayVm: OverlayControlViewModel = viewModel(
+        factory = SimpleVmFactory { OverlayControlViewModel(container) },
+    )
+    val snapshotVm: SnapshotAnnotationViewModel = viewModel(
+        factory = SimpleVmFactory { SnapshotAnnotationViewModel() },
+    )
+
+    // 动态路由（home/{state}、snapshot_annotation）即使与目标图不一致也不能把 App 带崩：
+    // 旧日志里 nav.navigate("home") 曾直接抛 IllegalArgumentException 导致 FATAL。
+    val navigateSafe: (String, NavOptionsBuilder.() -> Unit) -> Unit = { route, options ->
+        runCatching { nav.navigate(route, options) }
+    }
 
     val navigateTab: (String) -> Unit = navigateTab@{ route ->
         val target = if (route == "home") {
@@ -63,9 +85,18 @@ fun AppNavHost(vm: AppViewModel, container: AppContainer, context: Context) {
             route
         }
         if (nav.currentDestination?.route == target) return@navigateTab
-        nav.navigate(target) {
+        navigateSafe(target) {
             launchSingleTop = true
             popUpTo(target) { inclusive = true }
+        }
+    }
+
+    LaunchedEffect(snapshotUri) {
+        if (snapshotUri != null) {
+            navigateSafe("snapshot_annotation") {
+                launchSingleTop = true
+                popUpTo("onboarding") { inclusive = true }
+            }
         }
     }
 
@@ -73,9 +104,12 @@ fun AppNavHost(vm: AppViewModel, container: AppContainer, context: Context) {
         val route = nav.currentDestination?.route
         val target = "home/${uiState.voiceState.ui().key}"
         if (route?.startsWith("home/") == true && route != target) {
-            nav.navigate(target) { launchSingleTop = true }
-        } else if (uiState.voiceState == VoiceState.MANUAL_SILENT && route != target) {
-            nav.navigate(target) { launchSingleTop = true }
+            navigateSafe(target) { launchSingleTop = true }
+        } else if (
+            (uiState.voiceState == VoiceState.MANUAL_SILENT || uiState.voiceState == VoiceState.DISABLED) &&
+            route != target
+        ) {
+            navigateSafe(target) { launchSingleTop = true }
         }
     }
 
@@ -92,7 +126,7 @@ fun AppNavHost(vm: AppViewModel, container: AppContainer, context: Context) {
                 OnboardingScreen(
                     onNext = { nav.navigate("permissions") },
                     onSkip = {
-                        nav.navigate("home/silent") { popUpTo("onboarding") { inclusive = true } }
+                        nav.navigate("home/disabled") { popUpTo("onboarding") { inclusive = true } }
                     },
                 )
             }
@@ -100,12 +134,12 @@ fun AppNavHost(vm: AppViewModel, container: AppContainer, context: Context) {
                 PermissionsScreen(
                     onBack = { nav.popBackStack() },
                     onGranted = {
-                        vm.startVoice()
+                        // 授予权限只启动非语音服务；语音仍需在设置或悬浮面板显式开启。
                         vm.startServices(context)
-                        nav.navigate("home/idle") { popUpTo("permissions") { inclusive = true } }
+                        nav.navigate("home/disabled") { popUpTo("permissions") { inclusive = true } }
                     },
                     onManualOnly = {
-                        nav.navigate("home/silent") { popUpTo("permissions") { inclusive = true } }
+                        nav.navigate("home/disabled") { popUpTo("permissions") { inclusive = true } }
                     },
                 )
             }
@@ -134,7 +168,7 @@ fun AppNavHost(vm: AppViewModel, container: AppContainer, context: Context) {
 
             composable("overlay") {
                 OverlayControlScreen(
-                    vm = viewModel(factory = SimpleVmFactory { OverlayControlViewModel() }),
+                    vm = overlayVm,
                     onBack = { nav.popBackStack() },
                     onTab = navigateTab,
                 )
@@ -148,16 +182,18 @@ fun AppNavHost(vm: AppViewModel, container: AppContainer, context: Context) {
             }
             composable("panel") {
                 PanelScreen(
+                    vm = overlayVm,
                     onTab = navigateTab,
-                    onRunCommand = { id ->
-                        vm.runCommand(id)
+                    onRunMacro = { macroId ->
+                        vm.runMacro(macroId)
                         nav.navigate("home/executing") { launchSingleTop = true }
                     },
+                    onNewMacro = { SnapshotCaptureActivity.start(context) },
                 )
             }
             composable("adb") {
                 AdbScreen(
-                    vm = viewModel(factory = SimpleVmFactory { AdbViewModel(container, context) }),
+                    vm = viewModel(factory = SimpleVmFactory { AdbViewModel(container, context.applicationContext) }),
                     onBack = { nav.popBackStack() },
                     onTab = navigateTab,
                 )
@@ -165,6 +201,15 @@ fun AppNavHost(vm: AppViewModel, container: AppContainer, context: Context) {
             composable("mapping") {
                 MappingScreen(
                     vm = viewModel(factory = SimpleVmFactory { MappingViewModel() }),
+                    overlayVm = overlayVm,
+                    onBack = { nav.popBackStack() },
+                    onTab = navigateTab,
+                )
+            }
+            composable("snapshot_annotation") {
+                SnapshotAnnotationScreen(
+                    uri = snapshotUri,
+                    vm = snapshotVm,
                     onBack = { nav.popBackStack() },
                     onTab = navigateTab,
                 )
@@ -183,6 +228,7 @@ fun AppNavHost(vm: AppViewModel, container: AppContainer, context: Context) {
         if (shadeOpen) {
             NotificationShade(
                 info = uiState.voiceState.ui(),
+                lifecycle = uiState.voiceLifecycle,
                 onPause = { shadeOpen = false; vm.pause() },
                 onExit = { shadeOpen = false; vm.requestExit() },
                 onResume = { shadeOpen = false; vm.resume() },

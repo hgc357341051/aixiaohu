@@ -5,6 +5,8 @@ import com.aixiaohuadb.exec.CommandAction
 import com.aixiaohuadb.exec.CoordinateMapper
 import com.aixiaohuadb.exec.ExecResult
 import com.aixiaohuadb.exec.ExecStep
+import com.aixiaohuadb.exec.GesturePoint
+import com.aixiaohuadb.exec.GesturePointer
 import kotlinx.coroutines.runBlocking
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse

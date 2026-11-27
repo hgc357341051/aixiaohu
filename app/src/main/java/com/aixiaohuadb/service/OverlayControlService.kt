@@ -12,15 +12,20 @@ import android.view.MotionEvent
 import android.view.View
 import android.view.ViewConfiguration
 import android.view.WindowManager
-import android.widget.FrameLayout
 import android.widget.TextView
+import android.widget.Toast
+import androidx.core.app.NotificationManagerCompat
 import com.aixiaohuadb.App
-import com.aixiaohuadb.exec.CommandLibrary
+import com.aixiaohuadb.adb.AdbClient
+import com.aixiaohuadb.adb.AdbPhase
+import com.aixiaohuadb.adb.AdbTouchRecorder
 import com.aixiaohuadb.exec.ExecStep
 import com.aixiaohuadb.inference.api.ControlWord
 import com.aixiaohuadb.machine.VoiceEvent
 import com.aixiaohuadb.machine.VoiceState
+import com.aixiaohuadb.ui.SnapshotCaptureActivity
 import com.aixiaohuadb.ui.MainActivity
+import com.aixiaohuadb.voice.VoiceAction
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
@@ -30,14 +35,13 @@ import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
-import kotlinx.coroutines.withTimeout
 import java.util.concurrent.atomic.AtomicBoolean
 
 /**
  * 统一悬浮控制中心：悬浮球（语音入口）+ 指令按钮 + 自定义宏按钮 + 游戏内调节面板 + 逐点录制备份。
  *
  * 显示规则：球全局显示（语音入口）；按钮仅在王者荣耀前台（或面板打开时预览）显示。
- * 执行：COMMAND → CommandLibrary.actionFor；MACRO → MacroResolver；全局 CAS 执行锁防连点；
+ * 执行：MACRO → MacroResolver（COMMAND 仅兼容反序列化，不执行）；全局 CAS 执行锁防连点；
  * 反馈用按钮自身闪色（绿成功 / 红失败）替代 Toast。
  */
 class OverlayControlService : Service() {
@@ -50,29 +54,40 @@ class OverlayControlService : Service() {
     private val buttonViews = mutableMapOf<String, Pair<TextView, WindowManager.LayoutParams>>()
     private var panelHolder: OverlayViews.PanelHolder? = null
     private var panelParams: WindowManager.LayoutParams? = null
-    private var captureView: FrameLayout? = null
-    private var captureParams: WindowManager.LayoutParams? = null
+    /** 每次移除/重建面板自增，阻止旧 View.post 回调更新新面板或已移除的 View */
+    private var panelGeneration = 0
+    private var recordBarView: View? = null
+    private var recordBarParams: WindowManager.LayoutParams? = null
+    private var adbChipView: View? = null
+    private var adbChipParams: WindowManager.LayoutParams? = null
+    private var recording = false
+    private var adbRecorder: AdbTouchRecorder? = null
+    private var adbRecording = false
+
+    @Volatile
+    private var recordError: String = ""
+    /** 每次启动递增：迟到的 onUpdate/onError 不得覆盖新一轮录制或命名窗 */
+    private var recordingSession = 0
     private var namingView: View? = null
     private var namingParams: WindowManager.LayoutParams? = null
+    private var confirmView: View? = null
+    private var confirmParams: WindowManager.LayoutParams? = null
 
     // 状态缓存
     private var widgets: List<OverlayWidget> = emptyList()
     private var ballCfg = BallConfig()
     private var gameVisible = false
-    private var controlMode = ControlMode.VOICE
+    private var controlMode = ControlMode.DEFAULT
+    private var voiceEnabled = false
     private var panelOpen = false
     private var selectedTargetId: String? = null
-
-    // 录制
-    private class RecordedPoint(val x: Int, val y: Int, val gapMs: Long)
-    private val recordedPoints = mutableListOf<RecordedPoint>()
-    private var lastPointAt = 0L
 
     private data class Quad(
         val widgets: List<OverlayWidget>,
         val ball: BallConfig,
         val game: Boolean,
         val mode: ControlMode,
+        val voiceEnabled: Boolean,
     )
 
     override fun onCreate() {
@@ -90,15 +105,26 @@ class OverlayControlService : Service() {
                 OverlayStore.ball,
                 ForegroundGameMonitor.gameForeground,
                 OverlayStore.controlMode,
-            ) { w, b, g, m -> Quad(w, b, g, m) }.collect { (w, b, g, m) ->
+                (application as App).container.voiceLifecycle.voiceEnabled,
+            ) { w, b, g, m, v -> Quad(w, b, g, m, v) }.collect { (w, b, g, m, v) ->
                 widgets = w
                 ballCfg = b
                 gameVisible = g
+                voiceEnabled = v
                 val modeChanged = controlMode != m
                 controlMode = m
                 reconcile()
                 // 模式变化且面板打开时重建面板，实时反映状态/模式徽标
                 if (modeChanged && panelOpen) buildPanel()
+            }
+        }
+        // 标注页把步骤写回 pendingMacro 后，底部录制条要立刻更新计数并启用「完成」，
+        // 否则用户标注完仍看到 0 步、完成按钮不可点。
+        serviceScope?.launch {
+            OverlayStore.pendingMacro.collect { macro ->
+                recordBarView?.let { bar ->
+                    OverlayViews.updateRecordBar(bar, macro?.steps?.size ?: 0, false)
+                }
             }
         }
         // 前台兜底轮询：无障碍事件直达为主通道，500ms 轮询保证无障碍未开启时也能切换
@@ -110,20 +136,35 @@ class OverlayControlService : Service() {
         }
     }
 
-    override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int = START_STICKY
+    override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
+        when (intent?.action) {
+            MacroRecordNotification.ACTION_FINISH_RECORD -> finishAdbRecording()
+            MacroRecordNotification.ACTION_CANCEL_RECORD -> cancelAdbRecording()
+        }
+        return START_NOT_STICKY
+    }
 
     override fun onDestroy() {
+        recordingSession++
+        runCatching { adbRecorder?.stop() }
+        adbRecorder = null
+        adbRecording = false
+        MacroRecordNotification.hide(this)
         serviceScope?.cancel()
+        executing.set(false)
+        panelGeneration++
         listOfNotNull(ballPair?.first).forEach { runCatching { windowManager.removeView(it) } }
         buttonViews.values.forEach { (v, _) -> runCatching { windowManager.removeView(v) } }
         buttonViews.clear()
-        listOfNotNull(panelHolder?.root, captureView, namingView).forEach {
+        listOfNotNull(panelHolder?.root, namingView, recordBarView, adbChipView, confirmView).forEach {
             runCatching { windowManager.removeView(it) }
         }
         ballPair = null
         panelHolder = null
-        captureView = null
         namingView = null
+        recordBarView = null
+        adbChipView = null
+        confirmView = null
         super.onDestroy()
     }
 
@@ -136,7 +177,7 @@ class OverlayControlService : Service() {
         if (ballCfg.visible && ballPair == null) addBall()
         if (!ballCfg.visible && ballPair != null) removeBall()
         ballPair?.let { (view, params) ->
-            OverlayViews.applyBallStyle(this, view, params, ballCfg, controlMode)
+            OverlayViews.applyBallStyle(this, view, params, ballCfg, controlMode, voiceEnabled)
             val (x, y) = OverlayGestures.clampPosition(
                 params.x, params.y, params.width, params.height,
                 resources.displayMetrics.widthPixels, resources.displayMetrics.heightPixels,
@@ -145,8 +186,9 @@ class OverlayControlService : Service() {
             runCatching { windowManager.updateViewLayout(view, params) }
         }
 
-        // 按钮：游戏前台或面板预览时显示
-        val shown = if (gameVisible || panelOpen) widgets.filter { it.enabled } else emptyList()
+        // 按钮常驻：关闭面板、非游戏前台时不消失（参考自动连招工具的快捷键行为）
+        val shown = if (keepButtonsWhenPanelClosed) widgets.filter { it.enabled } else
+            if (gameVisible || panelOpen) widgets.filter { it.enabled } else emptyList()
         buttonViews.keys.toList().forEach { id ->
             val cfg = shown.firstOrNull { it.id == id }
             if (cfg == null) removeButton(id) else updateButton(cfg)
@@ -157,7 +199,7 @@ class OverlayControlService : Service() {
     private fun addBall() {
         val view = OverlayViews.createBall(this)
         val params = baseParams()
-        OverlayViews.applyBallStyle(this, view, params, ballCfg, controlMode)
+        OverlayViews.applyBallStyle(this, view, params, ballCfg, controlMode, voiceEnabled)
         val screen = resources.displayMetrics
         params.x = (ballCfg.fx * (screen.widthPixels - params.width).coerceAtLeast(0)).toInt()
         params.y = (ballCfg.fy * (screen.heightPixels - params.height).coerceAtLeast(0)).toInt()
@@ -217,8 +259,9 @@ class OverlayControlService : Service() {
             }
 
             override fun onDoubleTap(e: MotionEvent): Boolean {
-                // 双击快捷暂停/恢复语音，仅在语音模式有意义；手动模式由模式开关统一管理语音
-                if (controlMode == ControlMode.VOICE) {
+                // 双击快捷暂停/恢复语音：生命周期 DISABLED 后一律不响应
+                val lifecycle = (application as App).container.voiceLifecycle
+                if (lifecycle.isVoiceActionAllowed(VoiceAction.PAUSE_RESUME_VIA_BALL)) {
                     (application as App).container.stateMachine.send(
                         VoiceEvent.ControlDetected(ControlWord.C3_PAUSE, 1f),
                     )
@@ -354,7 +397,8 @@ class OverlayControlService : Service() {
     private fun execute(w: OverlayWidget, view: TextView) {
         val container = (application as App).container
         val action = when (w.kind) {
-            WidgetKind.COMMAND -> if (w.commandId in 0..13) CommandLibrary.actionFor(w.commandId) else null
+            // 固定指令已删除；旧 COMMAND 控件只反序列化兼容，点击一律拒绝
+            WidgetKind.COMMAND -> null
             WidgetKind.MACRO -> OverlayStore.macroByWidgetId(w.id)?.let { MacroResolver.buildCommandAction(it) }
         }
         if (action == null || action.steps.isEmpty()) {
@@ -365,17 +409,19 @@ class OverlayControlService : Service() {
             flashResult(w, view, false)
             return
         }
-        if (!executing.compareAndSet(false, true)) return
-        serviceScope?.launch {
-            val outcome = runCatching {
-                withTimeout(10_000L) {
-                    withContext(Dispatchers.IO) { container.executorChain.execute(action) }
-                }
+        // CAS 必须在 serviceScope 内做：scope 已取消时直接放弃，避免锁泄漏到服务销毁后
+        val scope = serviceScope ?: return
+        scope.launch {
+            if (!executing.compareAndSet(false, true)) return@launch
+            try {
+                // 手动回放走独立执行链：语音关闭后的取消令牌不得影响面板宏按钮
+                val outcome = runCatching { container.executeManual(action) }
+                val ok = outcome.getOrNull()?.success == true
+                container.telemetry.event("exec", "overlay_${if (ok) "ok" else "fail"}_${w.id}")
+                flashResult(w, view, ok)
+            } finally {
+                executing.set(false)
             }
-            executing.set(false)
-            val ok = outcome.getOrNull()?.success == true
-            container.telemetry.event("exec", "overlay_${if (ok) "ok" else "fail"}_${w.id}")
-            flashResult(w, view, ok)
         }
     }
 
@@ -406,6 +452,7 @@ class OverlayControlService : Service() {
 
     private fun buildPanel() {
         removePanelView()
+        val generation = panelGeneration
         val targets = buildList {
             add(null to "悬浮球")
             widgets.filter { it.enabled }.forEach { add(it.id to it.label) }
@@ -427,7 +474,7 @@ class OverlayControlService : Service() {
         }
         panelHolder = OverlayViews.createPanel(
             this, targets, selectedTargetId, sizeDp, alpha, locked, ballCfg.visible,
-            controlMode, buildStatusText(), voicePaused,
+            controlMode, buildStatusText(), voicePaused, voiceEnabled,
             OverlayViews.PanelCallbacks(
                 onSelectTarget = { id ->
                     selectedTargetId = id
@@ -463,15 +510,22 @@ class OverlayControlService : Service() {
                 },
                 onBallVisibleChange = { c -> OverlayStore.setBallVisible(c) },
                 onModeChange = { mode -> OverlayStore.setControlMode(mode) },
+                onVoiceBlocked = { showVoiceConfirm() },
                 onPauseVoice = {
-                    (application as App).container.stateMachine.send(
-                        VoiceEvent.ControlDetected(ControlWord.C3_PAUSE, 1f),
-                    )
+                    val lifecycle = (application as App).container.voiceLifecycle
+                    if (lifecycle.isVoiceActionAllowed(VoiceAction.PAUSE_RESUME_VIA_BALL)) {
+                        (application as App).container.stateMachine.send(
+                            VoiceEvent.ControlDetected(ControlWord.C3_PAUSE, 1f),
+                        )
+                    }
                 },
                 onResumeVoice = {
-                    (application as App).container.stateMachine.send(VoiceEvent.ManualResume)
+                    val lifecycle = (application as App).container.voiceLifecycle
+                    if (lifecycle.isVoiceActionAllowed(VoiceAction.PAUSE_RESUME_VIA_BALL)) {
+                        serviceScope?.launch { lifecycle.resume() }
+                    }
                 },
-                onStartRecord = { startCapture() },
+                onStartRecord = { startRecording() },
                 onOpenSettings = {
                     closePanel()
                     runCatching {
@@ -504,13 +558,17 @@ class OverlayControlService : Service() {
             x = px
             y = (ballCy - dp(180f)).coerceAtLeast(dp(8f))
         }
-        runCatching { windowManager.addView(panelHolder!!.root, panelParams) }
-        // 测量真实高度后把面板垂直居中于球，并夹在屏幕内
-        panelHolder?.root?.post {
-            val h = panelHolder?.root?.height ?: return@post
-            val p = panelParams ?: return@post
-            p.y = (ballCy - h / 2).coerceIn(dp(8f), (screen.heightPixels - h - dp(8f)).coerceAtLeast(dp(8f)))
-            runCatching { windowManager.updateViewLayout(panelHolder?.root ?: return@post, p) }
+        val root = panelHolder?.root ?: return
+        val params = panelParams ?: return
+        runCatching { windowManager.addView(root, params) }
+        // 测量真实高度后把面板垂直居中于球，并夹在屏幕内。
+        // 捕获 root/params/generation：快速切换模式会重建面板，旧回调不得操作新 View。
+        root.post {
+            if (generation != panelGeneration || panelHolder?.root !== root) return@post
+            val h = root.height
+            if (h <= 0) return@post
+            params.y = (ballCy - h / 2).coerceIn(dp(8f), (screen.heightPixels - h - dp(8f)).coerceAtLeast(dp(8f)))
+            runCatching { windowManager.updateViewLayout(root, params) }
         }
     }
 
@@ -526,6 +584,7 @@ class OverlayControlService : Service() {
             VoiceState.EXECUTE -> "执行中"
             VoiceState.COOLDOWN -> "冷却中"
             VoiceState.IDLE, VoiceState.ERROR, VoiceState.UNLOAD_WAKE -> "待机"
+            VoiceState.DISABLED -> "语音已关闭"
         }
         val gameLabel = if (gameVisible) "王者荣耀" else "非游戏"
         val adbLabel = if (container.adbClient.status.value.phase == com.aixiaohuadb.adb.AdbPhase.CONNECTED) "ADB" else "无障碍"
@@ -539,6 +598,7 @@ class OverlayControlService : Service() {
     }
 
     private fun removePanelView() {
+        panelGeneration++
         panelHolder?.root?.let { runCatching { windowManager.removeView(it) } }
         panelHolder = null
     }
@@ -547,62 +607,262 @@ class OverlayControlService : Service() {
 
     // ---------------- 录制宏 ----------------
 
-    private fun startCapture() {
-        if (captureView != null) return
+    /**
+     * 首选 ADB 被动监听：不添加任何可触摸覆盖层，游戏收到原始点击，我们只读内核事件。
+     * ADB 不可用或 getevent 失败时回落到底部录制条 + 截图标注方案，并明确告知原因。
+     */
+    private fun startRecording() {
+        val client: AdbClient = (application as App).container.adbClient
+        if (client.status.value.phase != AdbPhase.CONNECTED) {
+            Toast.makeText(
+                this,
+                "未连接 ADB：无法读取真实触摸，改为手动截屏标注坐标（不是录制）",
+                Toast.LENGTH_LONG,
+            ).show()
+            startSnapshotCapture()
+            return
+        }
+        if (adbRecording) return
         closePanel()
-        recordedPoints.clear()
-        lastPointAt = 0L
-        captureView = OverlayViews.createCaptureLayer(
-            this, 0,
-            OverlayViews.CaptureCallbacks(
-                onPoint = { x, y -> recordPoint(x, y) },
-                onFinish = { finishRecording() },
-                onCancel = { stopCapture() },
-            ),
-        )
-        captureParams = WindowManager.LayoutParams(
-            WindowManager.LayoutParams.MATCH_PARENT,
-            WindowManager.LayoutParams.MATCH_PARENT,
+        val scope = serviceScope ?: return
+        val session = ++recordingSession
+        recordError = ""
+        val recorder = AdbTouchRecorder(client, scope)
+        // 读循环可能在 start() 返回前极早失败（getevent 权限不足的典型场景）：
+        // 该标志确保"安装 recorder"与"回落"互斥，避免把已死的 recorder 装进录制态。
+        val errorSignalled = AtomicBoolean(false)
+        scope.launch(Dispatchers.IO) {
+            val started = try {
+                recorder.start(
+                    onUpdate = { steps -> scope.launch { if (session == recordingSession) onRecordUpdate(recorder, steps) } },
+                    onError = { message ->
+                        recordError = message
+                        errorSignalled.set(true)
+                        scope.launch { if (session == recordingSession) onRecordError(recorder) }
+                    },
+                )
+            } catch (t: Throwable) {
+                recordError = t.message.orEmpty()
+                false
+            }
+            withContext(Dispatchers.Main.immediate) {
+                if (!started || session != recordingSession) {
+                    if (started) runCatching { recorder.stop() }
+                    return@withContext
+                }
+                if (errorSignalled.get()) {
+                    // 早失败时 onError 的 Main 块因 recorder 未安装而 no-op，这里负责收尾
+                    runCatching { recorder.stop() }
+                    return@withContext
+                }
+                adbRecorder = recorder
+                adbRecording = true
+                OverlayStore.discardPendingMacro()
+                showAdbChip()
+                // 通知是可选入口：被用户关闭时屏幕胶囊仍能完成/取消
+                if (NotificationManagerCompat.from(this@OverlayControlService).areNotificationsEnabled()) {
+                    MacroRecordNotification.show(this@OverlayControlService, 0)
+                }
+            }
+            if (!started || errorSignalled.get()) {
+                withContext(Dispatchers.Main.immediate) {
+                    val reason = recordError.ifBlank { "getevent 不可用" }
+                    Toast.makeText(
+                        this@OverlayControlService,
+                        "被动录制不可用：$reason；改为手动截屏标注",
+                        Toast.LENGTH_LONG,
+                    ).show()
+                    startSnapshotCapture()
+                }
+            }
+        }
+    }
+
+    private fun onRecordUpdate(recorder: AdbTouchRecorder, steps: List<ExecStep>) {
+        if (!adbRecording || adbRecorder !== recorder || steps.isEmpty()) return
+        OverlayStore.stagePendingMacro(steps)
+        adbChipView?.let { OverlayViews.updateAdbRecordChip(it, steps.size) }
+        if (NotificationManagerCompat.from(this).areNotificationsEnabled()) {
+            MacroRecordNotification.show(this, steps.size)
+        }
+    }
+
+    private fun onRecordError(recorder: AdbTouchRecorder) {
+        // A synchronous start failure has adbRecorder==null; the !started branch above owns fallback then.
+        if (!adbRecording || adbRecorder !== recorder) return
+        runCatching { adbRecorder?.stop() }
+        adbRecorder = null
+        adbRecording = false
+        MacroRecordNotification.hide(this)
+        hideAdbChip()
+        Toast.makeText(
+            this,
+            "被动录制中断：${recordError.ifBlank { "getevent 结束" }}；改为手动截屏标注",
+            Toast.LENGTH_LONG,
+        ).show()
+        startSnapshotCapture()
+    }
+
+    private fun finishAdbRecording() {
+        MacroRecordNotification.hide(this)
+        hideAdbChip()
+        recordingSession++
+        if (!adbRecording) return
+        val steps: List<ExecStep> = adbRecorder?.stop().orEmpty()
+        adbRecording = false
+        adbRecorder = null
+        if (steps.isNotEmpty()) {
+            OverlayStore.stagePendingMacro(steps)
+            showNamingWindow()
+        } else {
+            OverlayStore.discardPendingMacro()
+        }
+    }
+
+    private fun cancelAdbRecording() {
+        MacroRecordNotification.hide(this)
+        hideAdbChip()
+        recordingSession++
+        if (!adbRecording) return
+        adbRecorder?.stop()
+        adbRecording = false
+        adbRecorder = null
+        OverlayStore.discardPendingMacro()
+    }
+
+    private fun showAdbChip() {
+        if (adbChipView != null) return
+        val chip = OverlayViews.createAdbRecordChip(this, OverlayViews.AdbRecordChipCallbacks(
+            onFinish = { finishAdbRecording() },
+            onCancel = { cancelAdbRecording() },
+        ))
+        val params = WindowManager.LayoutParams(
+            WindowManager.LayoutParams.WRAP_CONTENT,
+            dp(44f),
             WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY,
             WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE,
             PixelFormat.TRANSLUCENT,
-        )
-        runCatching { windowManager.addView(captureView, captureParams) }
-    }
-
-    private fun recordPoint(x: Int, y: Int) {
-        val now = System.currentTimeMillis()
-        val gap = if (recordedPoints.isEmpty()) 0L else (now - lastPointAt).coerceIn(0L, 10_000L)
-        lastPointAt = now
-        recordedPoints.add(RecordedPoint(x, y, gap))
-        captureView?.let { OverlayViews.addMarker(this, it, x, y) }
-        captureView?.findViewWithTag<TextView>("capture_hint")?.text =
-            "录制中（已标 ${recordedPoints.size} 点）：依次点击要录制的位置，点击不会传给游戏"
-    }
-
-    private fun finishRecording() {
-        if (recordedPoints.isEmpty()) {
-            stopCapture()
-            return
+        ).apply {
+            gravity = Gravity.TOP or Gravity.CENTER_HORIZONTAL
+            y = dp(44f)
         }
-        val mapper = (application as App).container.coordinateMapper
+        runCatching { windowManager.addView(chip, params) }
+        adbChipView = chip
+        adbChipParams = params
+    }
+
+    private fun hideAdbChip() {
+        adbChipView?.let { runCatching { windowManager.removeView(it) } }
+        adbChipView = null
+        adbChipParams = null
+    }
+
+    /**
+     * 回落方案：游戏内只保留底部 64dp 录制条；顶部 25% 零覆盖，录制条以外区域全部透传给游戏。
+     * 所有坐标点一律来自 MediaProjection 单帧截图 → 应用内 SnapshotAnnotationScreen 标注，
+     * 不存在任何覆盖游戏区域、消费触摸的拾取层。
+     */
+    private fun startSnapshotCapture() {
+        if (recordBarView != null) return
+        closePanel()
+        recording = true
+        refreshPendingCount()
         val screen = resources.displayMetrics
-        val steps = buildList {
-            recordedPoints.forEachIndexed { i, p ->
-                if (i > 0 && p.gapMs > 0) add(ExecStep.Wait(p.gapMs))
-                val (bx, by) = mapper.mapToBase(p.x, p.y, screen.widthPixels, screen.heightPixels)
-                add(ExecStep.Tap(bx, by))
-            }
+        val bar = OverlayViews.createRecordBar(this, OverlayViews.RecordBarCallbacks(
+            onToggleRecord = { SnapshotCaptureActivity.start(this) },
+            onUndo = {
+                OverlayStore.discardPendingMacro()
+                refreshPendingCount()
+            },
+            onFinish = {
+                if (OverlayStore.pendingMacro.value?.steps?.isNotEmpty() == true) {
+                    stopCapture()
+                    showNamingWindow()
+                } else {
+                    SnapshotCaptureActivity.start(this)
+                }
+            },
+            onCancel = { cancelRecording() },
+            onCollapsedChange = { collapsed ->
+                recordBarParams?.let { params ->
+                    params.width = if (collapsed) {
+                        dp(148f)
+                    } else {
+                        minOf(dp(380f), screen.widthPixels - dp(24f)).coerceAtLeast(dp(200f))
+                    }
+                    params.height = dp(64f)
+                    recordBarView?.let { view ->
+                        runCatching { windowManager.updateViewLayout(view, params) }
+                    }
+                }
+            },
+        ))
+        val width = minOf(dp(380f), screen.widthPixels - dp(24f)).coerceAtLeast(dp(200f))
+        recordBarParams = WindowManager.LayoutParams(
+            width, dp(64f),
+            WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY,
+            WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE,
+            PixelFormat.TRANSLUCENT,
+        ).apply {
+            // gravity=BOTTOM 时正的 y 会把条推出屏幕，必须用负偏移/底边距
+            gravity = Gravity.BOTTOM or Gravity.CENTER_HORIZONTAL
+            y = -dp(20f)
         }
-        OverlayStore.stagePendingMacro(steps)
+        runCatching { windowManager.addView(bar, recordBarParams) }
+        recordBarView = bar
+        refreshPendingCount()
+    }
+
+    /** 标注页保存后回到游戏时，计数以 pendingMacro 为准 */
+    private fun refreshPendingCount() {
+        val count = OverlayStore.pendingMacro.value?.steps?.size ?: 0
+        recordBarView?.let { OverlayViews.updateRecordBar(it, count, false) }
+    }
+
+    private fun cancelRecording() {
+        recording = false
+        OverlayStore.discardPendingMacro()
         stopCapture()
-        showNamingWindow()
     }
 
     private fun stopCapture() {
-        captureView?.let { runCatching { windowManager.removeView(it) } }
-        captureView = null
-        captureParams = null
+        recording = false
+        recordBarView?.let { runCatching { windowManager.removeView(it) } }
+        recordBarView = null
+        recordBarParams = null
+    }
+
+    /** 面板切语音模式：未开启时弹确认，enable 成功才真正切 mode */
+    private fun showVoiceConfirm() {
+        if (confirmView != null) return
+        val view = OverlayViews.createVoiceConfirmWindow(
+            this,
+            onConfirm = {
+                closeVoiceConfirm()
+                serviceScope?.launch {
+                    val result = (application as App).container.voiceLifecycle.enable(
+                        com.aixiaohuadb.voice.VoiceStartReason.OVERLAY_SWITCH,
+                    )
+                    if (result.isSuccess) OverlayStore.setControlMode(ControlMode.VOICE)
+                }
+            },
+            onCancel = { closeVoiceConfirm() },
+        )
+        confirmParams = WindowManager.LayoutParams(
+            (resources.displayMetrics.widthPixels * 0.86f).toInt(),
+            WindowManager.LayoutParams.WRAP_CONTENT,
+            WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY,
+            0,
+            PixelFormat.TRANSLUCENT,
+        ).apply { gravity = Gravity.CENTER }
+        confirmView = view
+        runCatching { windowManager.addView(view, confirmParams) }
+    }
+
+    private fun closeVoiceConfirm() {
+        confirmView?.let { runCatching { windowManager.removeView(it) } }
+        confirmView = null
+        confirmParams = null
     }
 
     private fun showNamingWindow() {
@@ -659,6 +919,9 @@ class OverlayControlService : Service() {
     }
 
     companion object {
+        /** 宏按钮在游戏中常驻：面板关闭后仍可点击回放（当前为固定行为，无 UI 开关） */
+        const val keepButtonsWhenPanelClosed = true
+
         fun start(context: Context) {
             if (!Settings.canDrawOverlays(context)) return
             runCatching { context.startService(Intent(context, OverlayControlService::class.java)) }

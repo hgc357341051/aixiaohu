@@ -12,17 +12,24 @@ import androidx.compose.material.icons.filled.Mic
 import androidx.compose.material.icons.filled.NotificationsActive
 import androidx.compose.material.icons.filled.Security
 import androidx.compose.material.icons.filled.Tune
+import androidx.compose.material.icons.filled.VideogameAsset
+import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.unit.dp
 import com.aixiaohuadb.BuildConfig
 import com.aixiaohuadb.config.Sensitivity
 import com.aixiaohuadb.config.WakeMode
 import com.aixiaohuadb.inference.api.Delegate
+import com.aixiaohuadb.service.ControlMode
 import com.aixiaohuadb.ui.common.PillChip
 import com.aixiaohuadb.ui.common.QuietButton
 import com.aixiaohuadb.ui.common.ScreenFrame
@@ -43,14 +50,41 @@ fun SettingsScreen(
     onDebug: () -> Unit,
 ) {
     val config by vm.config.collectAsState()
+    val controlMode by vm.controlMode.collectAsState()
+    val voiceEnabled by vm.voiceEnabled.collectAsState()
+    var pendingVoice by remember { mutableStateOf(false) }
     ScreenFrame(
         title = "设置",
         subtitle = "本地持久化 · ${BuildConfig.FLAVOR_NAME}",
         activeTab = "settings",
         onTab = onTab,
     ) {
-        SectionCard(icon = Icons.Filled.Mic, title = "语音唤醒") {
-            ToggleRow("语音唤醒开关", "默认 ON，即时生效", config.voiceWakeup.enabled) { vm.setWakeEnabled(it) }
+        SectionCard(icon = Icons.Filled.VideogameAsset, title = "控制模式") {
+            Text(
+                "默认无障碍模式，不拾音；语音需显式确认；ADB 保持后台长连接。",
+                style = MaterialTheme.typography.labelSmall,
+                color = Muted,
+            )
+            Segment(
+                options = ControlMode.entries.map { it.label },
+                selectedIndex = ControlMode.entries.indexOf(controlMode),
+                onSelect = { index ->
+                    val target = ControlMode.entries[index]
+                    if (target == ControlMode.VOICE && !voiceEnabled) pendingVoice = true
+                    else vm.setControlMode(target)
+                },
+            )
+        }
+
+        SectionCard(icon = Icons.Filled.Mic, title = "语音识别") {
+            ToggleRow(
+                "语音识别总开关",
+                "默认关闭；开启才会启动麦克风、模型与常驻通知",
+                voiceEnabled,
+            ) { enabled ->
+                if (enabled && !voiceEnabled) pendingVoice = true else vm.setVoiceEnabled(enabled)
+            }
+            ToggleRow("语音唤醒开关", "总开关开启后才可能生效", config.voiceWakeup.enabled) { vm.setWakeEnabled(it) }
             SubLabel("运行模式", "voice / manual / manual_silent")
             Segment(
                 options = listOf("voice", "manual", "silent"),
@@ -126,6 +160,22 @@ fun SettingsScreen(
             }
             Spacer(Modifier.height(Spacing.sm))
             PillChip("voice-control v0.1.0 · ${vm.modelVersion}")
+        }
+        if (pendingVoice) {
+            AlertDialog(
+                onDismissRequest = { pendingVoice = false },
+                title = { Text("开启语音识别？") },
+                text = { Text("将启动麦克风拾音、加载语音模型并显示常驻通知。关闭后物理释放，不会后台监听。") },
+                confirmButton = {
+                    TextButton(onClick = {
+                        pendingVoice = false
+                        vm.setVoiceEnabled(true)
+                    }) { Text("确认开启") }
+                },
+                dismissButton = {
+                    TextButton(onClick = { pendingVoice = false }) { Text("取消") }
+                },
+            )
         }
         Spacer(Modifier.height(Spacing.sm))
     }

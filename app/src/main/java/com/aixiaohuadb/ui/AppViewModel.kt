@@ -17,7 +17,7 @@ import com.aixiaohuadb.machine.SideEffect
 import com.aixiaohuadb.machine.VoiceEvent
 import com.aixiaohuadb.machine.VoiceState
 import com.aixiaohuadb.service.OverlayControlService
-import com.aixiaohuadb.service.VoiceForegroundService
+import com.aixiaohuadb.voice.VoiceLifecycleState
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
@@ -37,6 +37,7 @@ class AppViewModel(private val container: AppContainer) : ViewModel() {
         val showExitConfirm: Boolean = false,
         val isDemo: Boolean = true,
         val metrics: VoiceMetrics = VoiceMetrics(),
+        val voiceLifecycle: VoiceLifecycleState = VoiceLifecycleState.DISABLED,
     )
 
     private val _ui = MutableStateFlow(
@@ -54,6 +55,11 @@ class AppViewModel(private val container: AppContainer) : ViewModel() {
             container.stateMachine.state.collect { state ->
                 _ui.update { it.copy(voiceState = state) }
                 container.refreshNotification()
+            }
+        }
+        viewModelScope.launch {
+            container.voiceLifecycle.state.collect { lifecycle ->
+                _ui.update { it.copy(voiceLifecycle = lifecycle) }
             }
         }
         viewModelScope.launch(Dispatchers.Default) {
@@ -76,12 +82,9 @@ class AppViewModel(private val container: AppContainer) : ViewModel() {
         }
     }
 
-    fun startVoice() {
-        container.stateMachine.send(VoiceEvent.Start)
-    }
-
     fun openWindow() {
-        container.stateMachine.send(VoiceEvent.Start)
+        // 语音只能由设置开关 / 悬浮窗语音模式显式启动；这里仅在已运行时打开指令窗。
+        if (container.voiceLifecycle.state.value != VoiceLifecycleState.RUNNING) return
         container.stateMachine.send(VoiceEvent.WakeVerified(0.92f))
     }
 
@@ -102,8 +105,15 @@ class AppViewModel(private val container: AppContainer) : ViewModel() {
 
     fun runCommand(commandId: Int) {
         container.stateMachine.send(
-            VoiceEvent.CommandDetected(resultFor(commandId), 0.95f),
+            VoiceEvent.CommandDetected(resultForSlot(commandId), 0.95f),
         )
+    }
+
+    /** 手动面板 / 悬浮宏按钮：直接回放用户宏，不经过语音状态机 */
+    fun runMacro(macroId: Long) = viewModelScope.launch {
+        val result = container.executeMacro(macroId)
+        addLog("MACRO $macroId ${if (result.success) "ok" else "fail"}: ${result.message}")
+        _ui.update { it.copy(toast = if (result.success) "宏执行成功" else "宏执行失败：${result.message}") }
     }
 
     /** 调试页：直接注入流程事件，便于验证 7 态与 C1–C4 */
@@ -128,7 +138,7 @@ class AppViewModel(private val container: AppContainer) : ViewModel() {
     }
 
     fun startServices(context: Context) {
-        VoiceForegroundService.start(context.applicationContext)
+        // 语音通知由 VoiceLifecycleController.enable() 按需拉起，这里只启动悬浮控制服务。
         OverlayControlService.start(context.applicationContext)
     }
 
@@ -136,18 +146,13 @@ class AppViewModel(private val container: AppContainer) : ViewModel() {
 
     fun lastDemoFactory(): DemoInferenceFactory? = container.currentFactory as? DemoInferenceFactory
 
-    private fun resultFor(id: Int): CommandResult = when (id) {
-        13 -> CommandResult(ActionLabel.A1_SWITCH, ObjectLabel.P6_POSITION, id, 0.95f)
-        14 -> CommandResult(ActionLabel.A2_NONE, ObjectLabel.OTHER, id, 0.5f)
-        in 7..12 -> CommandResult(
-            ActionLabel.A0_SWAP,
-            ObjectLabel.entries[ObjectLabel.P0.ordinal + id - 7],
-            id,
-            0.95f,
-        )
-        in 0..6 -> CommandResult(ActionLabel.A0_SWAP, ObjectLabel.entries[id], id, 0.95f)
-        else -> CommandResult(ActionLabel.A2_NONE, ObjectLabel.OTHER, 14, 0.5f)
-    }
+    /** 调试注入：commandId 只代表语音槽位，不再携带任何内置固定指令语义 */
+    private fun resultForSlot(slot: Int): CommandResult = CommandResult(
+        ActionLabel.A0_SWAP,
+        ObjectLabel.OTHER,
+        slot.coerceIn(0, 14),
+        0.95f,
+    )
 
     private fun addLog(line: String) {
         val time = SimpleDateFormat("HH:mm:ss", Locale.CHINA).format(Date())

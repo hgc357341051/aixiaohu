@@ -15,9 +15,10 @@ import kotlinx.coroutines.flow.map
 private val Context.settingsDataStore: DataStore<Preferences> by preferencesDataStore(name = "voice_settings")
 
 /** Preferences DataStore 持久化所有开关与阈值，配置跟随用户而非模型版本 */
-class SettingsStore(private val context: Context) {
+class SettingsStore(private val context: Context) : com.aixiaohuadb.voice.VoiceSettings {
 
     private object Keys {
+        val VOICE_ENABLED = booleanPreferencesKey("voice_enabled_v1")
         val WAKE_ENABLED = booleanPreferencesKey("wake_enabled")
         val WAKE_MODE = stringPreferencesKey("wake_mode")
         val SENSITIVITY = stringPreferencesKey("sensitivity")
@@ -31,6 +32,11 @@ class SettingsStore(private val context: Context) {
         val TAU_COARSE = floatPreferencesKey("tau_coarse")
         val TAU_FINE = floatPreferencesKey("tau_fine")
         val TAU_CMD = floatPreferencesKey("tau_cmd")
+    }
+
+    /** 语音子系统总开关，默认 false；唯一真源，冷启动只读取不自动启动 */
+    override val voiceEnabledFlow: Flow<Boolean> = context.settingsDataStore.data.map { p ->
+        p[Keys.VOICE_ENABLED] ?: false
     }
 
     val configFlow: Flow<AppConfig> = context.settingsDataStore.data.map { p ->
@@ -74,6 +80,8 @@ class SettingsStore(private val context: Context) {
     private suspend fun put(key: Preferences.Key<Float>, value: Float) {
         context.settingsDataStore.edit { it[key] = value }
     }
+
+    override suspend fun setVoiceEnabled(value: Boolean) = put(Keys.VOICE_ENABLED, value)
 
     suspend fun setWakeEnabled(value: Boolean) = put(Keys.WAKE_ENABLED, value)
     suspend fun setWakeMode(value: WakeMode) = put(Keys.WAKE_MODE, value.name)

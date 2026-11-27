@@ -31,8 +31,10 @@ object OverlayStore {
     private val KEY_WIDGETS = stringPreferencesKey("widgets_v2")
     private val KEY_BALL = stringPreferencesKey("ball_v1")
     private val KEY_MACROS = stringPreferencesKey("macros_v1")
+    private val KEY_MACROS_V2 = stringPreferencesKey("macros_v2")
     private val KEY_LEGACY = stringPreferencesKey("buttons_json")
-    private val KEY_MODE = stringPreferencesKey("control_mode_v1")
+    private val KEY_MODE_V1 = stringPreferencesKey("control_mode_v1")
+    private val KEY_MODE_V2 = stringPreferencesKey("control_mode_v2")
 
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
     private val writeMutex = Mutex()
@@ -51,15 +53,19 @@ object OverlayStore {
     private val _pendingMacro = MutableStateFlow<MacroConfig?>(null)
     val pendingMacro: StateFlow<MacroConfig?> = _pendingMacro.asStateFlow()
 
-    /** 控制模式：语音识别 / 手动点触；默认语音 */
-    private val _controlMode = MutableStateFlow(ControlMode.VOICE)
+    /** 控制模式：默认 ACCESSIBILITY（手动、非语音）；旧 MANUAL 数据由 fromKey 迁移 */
+    private val _controlMode = MutableStateFlow(ControlMode.DEFAULT)
     val controlMode: StateFlow<ControlMode> = _controlMode.asStateFlow()
 
-    /** 模式变更副作用钩子：由 App 注入 container.applyControlMode，使切换真实启停语音链路 */
+    /**
+     * 模式变更副作用钩子：由 App 注入 container.applyControlMode。
+     * [fromRestore] 为 true 表示冷启动数据恢复，只收敛内存状态；
+     * 绝不自动启动语音/ADB 服务，也绝不落盘改写用户开关。
+     */
     @Volatile
-    private var modeApplier: ((ControlMode) -> Unit)? = null
+    private var modeApplier: ((ControlMode, Boolean) -> Unit)? = null
 
-    fun setModeApplier(applier: (ControlMode) -> Unit) {
+    fun setModeApplier(applier: (ControlMode, Boolean) -> Unit) {
         modeApplier = applier
     }
 
@@ -72,24 +78,32 @@ object OverlayStore {
         appContext = context.applicationContext
         scope.launch {
             val prefs = runCatching { appContext!!.overlayStoreDataStore.data.first() }.getOrNull() ?: return@launch
-            val v2 = prefs[KEY_WIDGETS]?.let { OverlayCodec.decodeWidgets(it) }.orEmpty()
+            // 预置固定指令按钮只做反序列化兼容：旧数据读出后立即过滤，不再显示。
+            val decodedWidgets = prefs[KEY_WIDGETS]?.let { OverlayCodec.decodeWidgets(it) }.orEmpty()
+            val v2 = decodedWidgets.filterNot { it.kind == WidgetKind.COMMAND }
+            // 过滤后必须写回：否则下一次冷启动仍会读到旧的固定指令按钮
+            if (decodedWidgets.size != v2.size) persistWidgetsNow(v2)
             if (v2.isNotEmpty()) {
                 _widgets.value = v2
             } else {
                 val legacy = prefs[KEY_LEGACY]?.let { OverlayCodec.migrateLegacy(it) }.orEmpty()
+                    .filterNot { it.kind == WidgetKind.COMMAND }
                 if (legacy.isNotEmpty()) {
                     _widgets.value = legacy
                     persistWidgetsNow(legacy)
                 }
             }
             prefs[KEY_BALL]?.let { OverlayCodec.decodeBall(it) }?.let { _ball.value = it }
-            prefs[KEY_MACROS]?.let { OverlayCodec.decodeMacros(it) }.orEmpty()
-                .takeIf { it.isNotEmpty() }?.let { _macros.value = it }
-            prefs[KEY_MODE]?.let { ControlMode.fromKey(it) }?.let { restored ->
-                _controlMode.value = restored
-                // 恢复手动模式时同步真实停麦；默认语音模式不打断既有启动流程
-                if (restored == ControlMode.MANUAL) modeApplier?.invoke(restored)
+            val macrosV2 = prefs[KEY_MACROS_V2]?.let { OverlayCodec.decodeMacros(it) }.orEmpty()
+            val restoredMacros = macrosV2.ifEmpty {
+                prefs[KEY_MACROS]?.let { OverlayCodec.decodeMacros(it) }.orEmpty()
             }
+            restoredMacros.takeIf { it.isNotEmpty() }?.let { _macros.value = it }
+            // control_mode_v2 优先；旧 control_mode_v1 经 fromKey 迁移（MANUAL → ACCESSIBILITY）。
+            val restored = ControlMode.fromKey(prefs[KEY_MODE_V2] ?: prefs[KEY_MODE_V1])
+            _controlMode.value = restored
+            // 任意模式恢复只收敛内存状态；fromRestore=true 保证冷启动不启动服务/语音
+            notifyModeApplied(restored, true)
         }
     }
 
@@ -102,26 +116,23 @@ object OverlayStore {
 
     fun nextMacroId(): Long = nextMacroId(_macros.value)
 
-    // ---------------- widgets ----------------
+    // ---------------- control mode ----------------
 
-    fun addPreset(commandId: Int, label: String) {
-        mutateWidgets { current ->
-            if (current.any { it.kind == WidgetKind.COMMAND && it.commandId == commandId }) {
-                current
-            } else {
-                val fy = 0.28f + current.count { it.enabled } * 0.13f
-                current + OverlayWidget(
-                    id = "cmd:$commandId",
-                    kind = WidgetKind.COMMAND,
-                    commandId = commandId,
-                    label = OverlayCodec.sanitizeLabel(label),
-                    fx = 0.92f,
-                    fy = fy.coerceAtMost(0.86f),
-                )
-            }
-        }
-        ensureServicesRunning()
+    /** 切换控制模式：更新持久化状态 + 触发真实语音/ADB 链路启停 */
+    @Synchronized
+    fun setControlMode(mode: ControlMode) {
+        if (_controlMode.value == mode) return
+        _controlMode.value = mode
+        schedulePersist()
+        notifyModeApplied(mode)
     }
+
+    /** 通知当前模式已被真实应用；冷启动恢复与 UI 切换共用同一副作用通道 */
+    private fun notifyModeApplied(mode: ControlMode, fromRestore: Boolean = false) {
+        modeApplier?.invoke(mode, fromRestore)
+    }
+
+    // ---------------- widgets ----------------
 
     fun removeWidget(id: String) {
         mutateWidgets { current -> current.filterNot { it.id == id } }
@@ -173,16 +184,6 @@ object OverlayStore {
     fun setBallLocked(locked: Boolean) {
         _ball.value = _ball.value.copy(locked = locked)
         schedulePersist()
-    }
-
-    // ---------------- control mode ----------------
-
-    /** 切换控制模式：更新持久化状态 + 触发真实语音链路启停 */
-    fun setControlMode(mode: ControlMode) {
-        if (_controlMode.value == mode) return
-        _controlMode.value = mode
-        schedulePersist()
-        modeApplier?.invoke(mode)
     }
 
     // ---------------- macros ----------------
@@ -246,7 +247,8 @@ object OverlayStore {
     /** 创建/保存后服务未运行时自动拉起（仅前台调用方触发，满足 Android 12+ 限制） */
     fun ensureServicesRunning() {
         val context = appContext ?: return
-        OverlayControlService.start(context)
+        // 系统拒绝后台启动服务时不能带崩保存宏/创建按钮的整条 UI 流程
+        runCatching { OverlayControlService.start(context) }
     }
 
     // ---------------- 内部 ----------------
@@ -278,21 +280,21 @@ object OverlayStore {
         val widgetsJson = OverlayCodec.encodeWidgets(_widgets.value)
         val ballJson = OverlayCodec.encodeBall(_ball.value)
         val macrosJson = OverlayCodec.encodeMacros(_macros.value)
+        val modeKey = _controlMode.value.name
         writeMutex.withLock {
             runCatching {
                 context.overlayStoreDataStore.edit {
                     it[KEY_WIDGETS] = widgetsJson
                     it[KEY_BALL] = ballJson
-                    it[KEY_MACROS] = macrosJson
-                    it[KEY_MODE] = _controlMode.value.name
+                    it[KEY_MACROS_V2] = macrosJson
+                    it[KEY_MODE_V2] = modeKey
+                    // 旧键同步回写，回退老版本时不至于丢失模式选择
+                    it[KEY_MODE_V1] = modeKey
                 }
             }
         }
     }
 
-    private fun defaultWidgets(): List<OverlayWidget> = listOf(
-        OverlayWidget(id = "cmd:0", kind = WidgetKind.COMMAND, commandId = 0, label = "名刀", fx = 0.92f, fy = 0.28f),
-        OverlayWidget(id = "cmd:1", kind = WidgetKind.COMMAND, commandId = 1, label = "复活甲", fx = 0.92f, fy = 0.41f),
-        OverlayWidget(id = "cmd:2", kind = WidgetKind.COMMAND, commandId = 2, label = "辉月", fx = 0.92f, fy = 0.54f),
-    )
+    /** 固定指令已删除：默认不预置任何按钮，只有用户录制/保存的宏才创建按钮 */
+    private fun defaultWidgets(): List<OverlayWidget> = emptyList()
 }

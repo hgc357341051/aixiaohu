@@ -212,7 +212,7 @@ fun DebugScreen(
                 )
             }
             Row(modifier = Modifier.fillMaxWidth()) {
-                QuietButton(text = "注入指令：换名刀", onClick = { appVm.runCommand(0) })
+                QuietButton(text = "注入指令：槽位 1", onClick = { appVm.runCommand(0) })
             }
             Row(modifier = Modifier.fillMaxWidth()) {
                 QuietButton(text = "C1", onClick = { appVm.control(ControlWord.C1_EXIT_WAKE) })

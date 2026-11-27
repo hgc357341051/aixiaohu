@@ -20,23 +20,13 @@ object LabelBook {
         "WK_WAKE_XIAOHU_XIAOHU" to listOf("小胡小胡"),
     )
 
-    val commandLabels: Map<Int, String> = mapOf(
-        0 to "换名刀",
-        1 to "换复活甲",
-        2 to "换辉月",
-        3 to "换吸血书",
-        4 to "换吸血刀",
-        5 to "换冰甲",
-        6 to "换血魔",
-        7 to "换1号位",
-        8 to "换2号位",
-        9 to "换3号位",
-        10 to "换4号位",
-        11 to "换5号位",
-        12 to "换6号位",
-        13 to "切换位置",
-        14 to "CMD_OTHER_UNKNOWN",
-    )
+    /**
+     * 推理层仍输出 15 类，但 0..13 是用户可绑定槽位，14 固定为拒识槽；
+     * 槽位不再代表任何内置坐标指令，用户说法由 MacroBindingStore 提供。
+     */
+    val commandLabels: Map<Int, String> = (0..14).associateWith {
+        if (it == 14) "拒识" else "槽位 ${it + 1}"
+    }
 
     val actionLabels: List<String> = listOf("A0_SWAP", "A1_SWITCH", "A2_NONE")
     val objectLabels: List<String> = listOf(
