@@ -1,7 +1,6 @@
 package com.aixiaohuadb.di
 
 import android.content.Context
-import android.content.res.Resources
 import com.aixiaohuadb.adb.AdbBridgeController
 import com.aixiaohuadb.adb.AdbClient
 import com.aixiaohuadb.adb.AdbInputExecutor
@@ -16,6 +15,7 @@ import com.aixiaohuadb.domain.RecognitionPipeline
 import com.aixiaohuadb.domain.RecognizeUseCase
 import com.aixiaohuadb.domain.VoiceMetrics
 import com.aixiaohuadb.domain.WakeUseCase
+import com.aixiaohuadb.exec.DisplaySize
 import com.aixiaohuadb.exec.AccessibilityExecutor
 import com.aixiaohuadb.exec.CoordinateMapper
 import com.aixiaohuadb.exec.CommandAction
@@ -143,11 +143,8 @@ class AppContainer(private val context: Context) {
     /** 语音链路：生命周期取消令牌可在 disable 时打断执行中的宏 */
     private val executorChain = buildExecutorChain(voiceExecutionGuard)
 
-    /** 真实屏幕尺寸：Resources.getSystem() 会随横竖屏自然交换宽高 */
-    private fun screenSize(): Pair<Int, Int> {
-        val metrics = Resources.getSystem().displayMetrics
-        return metrics.widthPixels to metrics.heightPixels
-    }
+    /** 当前显示尺寸：以 WindowManager 为准，避免后台进程资源停留在旧方向 */
+    private fun screenSize(): Pair<Int, Int> = DisplaySize.current(context)
 
     private val wakeUseCase = WakeUseCase(
         wakeProvider = { currentFactory.wakeDetector() },

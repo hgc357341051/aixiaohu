@@ -5,6 +5,7 @@ import android.os.Build
 import android.provider.Settings
 import android.view.Surface
 import android.view.WindowManager
+import com.aixiaohuadb.exec.DisplaySize
 import com.flyfishxu.kadb.Kadb
 import com.flyfishxu.kadb.cert.KadbCert
 import com.flyfishxu.kadb.shell.AdbShellStream
@@ -38,10 +39,7 @@ private val DEVICE_PATH = Regex("^/dev/input/event\\d+$")
  */
 class AdbClient(
     private val context: Context,
-    private val screenSizeProvider: () -> Pair<Int, Int> = {
-        val m = context.resources.displayMetrics
-        m.widthPixels to m.heightPixels
-    },
+    private val screenSizeProvider: () -> Pair<Int, Int> = { DisplaySize.current(context) },
 ) : InputCommandExecutor, AdbTransport {
 
     private val ioMutex = Mutex()

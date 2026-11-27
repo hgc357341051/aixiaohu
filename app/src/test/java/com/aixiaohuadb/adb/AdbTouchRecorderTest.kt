@@ -224,6 +224,19 @@ class AdbTouchRecorderTest {
     }
 
     @Test
+    fun `横屏尺寸下右侧触点不会被夹到基准右边缘`() {
+        // 游戏横屏 2340×1080；旧实现误用竖屏 1080×2340，x>1080 全部被夹成 1080
+        val acc = TouchAccumulator(2340, 1080, 2339, 1079, CoordinateMapper())
+        down(acc, 1_000L, 2_000, 500)
+        up(acc, 1_100L)
+
+        val tap = acc.steps().single() as ExecStep.Tap
+        assertEquals(923, tap.x)
+        assertEquals(1_083, tap.y)
+        assertTrue(tap.x < 1079)
+    }
+
+    @Test
     fun `ROTATION_90 把面板原生坐标映射到显示坐标`() {
         assertEquals(0 to 540, mapPanelToDisplay(539, 0, maxX, maxY, Surface.ROTATION_90))
 

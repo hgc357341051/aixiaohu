@@ -8,6 +8,7 @@ import com.aixiaohuadb.exec.GesturePlanner
 import com.aixiaohuadb.exec.GesturePoint
 import com.aixiaohuadb.exec.GesturePointer
 import com.aixiaohuadb.exec.GestureSink
+import com.aixiaohuadb.exec.DisplaySize
 import com.aixiaohuadb.exec.clampSwipeDurationMs
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.suspendCancellableCoroutine
@@ -121,10 +122,7 @@ class VoiceAccessibilityService : AccessibilityService(), GestureSink {
         }
     }
 
-    private fun displaySize(): Pair<Int, Int> {
-        val metrics = resources.displayMetrics
-        return metrics.widthPixels.coerceAtLeast(1) to metrics.heightPixels.coerceAtLeast(1)
-    }
+    private fun displaySize(): Pair<Int, Int> = DisplaySize.current(this)
 
     /**
      * 等待系统真正回调完成。

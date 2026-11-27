@@ -13,12 +13,14 @@ import android.view.View
 import android.view.ViewConfiguration
 import android.view.WindowManager
 import android.widget.TextView
+import android.util.Log
 import android.widget.Toast
 import androidx.core.app.NotificationManagerCompat
 import com.aixiaohuadb.App
 import com.aixiaohuadb.adb.AdbClient
 import com.aixiaohuadb.adb.AdbPhase
 import com.aixiaohuadb.adb.AdbTouchRecorder
+import com.aixiaohuadb.exec.DisplaySize
 import com.aixiaohuadb.exec.ExecStep
 import com.aixiaohuadb.inference.api.ControlWord
 import com.aixiaohuadb.machine.VoiceEvent
@@ -178,9 +180,10 @@ class OverlayControlService : Service() {
         if (!ballCfg.visible && ballPair != null) removeBall()
         ballPair?.let { (view, params) ->
             OverlayViews.applyBallStyle(this, view, params, ballCfg, controlMode, voiceEnabled)
+            val (screenW, screenH) = screenSize()
             val (x, y) = OverlayGestures.clampPosition(
                 params.x, params.y, params.width, params.height,
-                resources.displayMetrics.widthPixels, resources.displayMetrics.heightPixels,
+                screenW, screenH,
             )
             params.x = x; params.y = y
             runCatching { windowManager.updateViewLayout(view, params) }
@@ -200,9 +203,9 @@ class OverlayControlService : Service() {
         val view = OverlayViews.createBall(this)
         val params = baseParams()
         OverlayViews.applyBallStyle(this, view, params, ballCfg, controlMode, voiceEnabled)
-        val screen = resources.displayMetrics
-        params.x = (ballCfg.fx * (screen.widthPixels - params.width).coerceAtLeast(0)).toInt()
-        params.y = (ballCfg.fy * (screen.heightPixels - params.height).coerceAtLeast(0)).toInt()
+        val (screenW, screenH) = screenSize()
+        params.x = (ballCfg.fx * (screenW - params.width).coerceAtLeast(0)).toInt()
+        params.y = (ballCfg.fy * (screenH - params.height).coerceAtLeast(0)).toInt()
         bindBallGestures(view, params)
         runCatching { windowManager.addView(view, params) }
         ballPair = view to params
@@ -217,9 +220,9 @@ class OverlayControlService : Service() {
         val view = OverlayViews.createButton(this)
         val params = baseParams()
         OverlayViews.applyButtonStyle(this, view, params, w)
-        val screen = resources.displayMetrics
-        params.x = (w.fx * (screen.widthPixels - params.width).coerceAtLeast(0)).toInt()
-        params.y = (w.fy * (screen.heightPixels - params.height).coerceAtLeast(0)).toInt()
+        val (screenW, screenH) = screenSize()
+        params.x = (w.fx * (screenW - params.width).coerceAtLeast(0)).toInt()
+        params.y = (w.fy * (screenH - params.height).coerceAtLeast(0)).toInt()
         bindButtonGestures(view, params, w.id)
         runCatching { windowManager.addView(view, params) }
         buttonViews[w.id] = view to params
@@ -228,9 +231,10 @@ class OverlayControlService : Service() {
     private fun updateButton(w: OverlayWidget) {
         val pair = buttonViews[w.id] ?: return
         OverlayViews.applyButtonStyle(this, pair.first, pair.second, w)
+        val (screenW, screenH) = screenSize()
         val (x, y) = OverlayGestures.clampPosition(
             pair.second.x, pair.second.y, pair.second.width, pair.second.height,
-            resources.displayMetrics.widthPixels, resources.displayMetrics.heightPixels,
+            screenW, screenH,
         )
         pair.second.x = x; pair.second.y = y
         runCatching { windowManager.updateViewLayout(pair.first, pair.second) }
@@ -299,9 +303,10 @@ class OverlayControlService : Service() {
                         }
                         params.x = startX + (e.rawX - downRawX).toInt()
                         params.y = startY + (e.rawY - downRawY).toInt()
+                        val (screenW, screenH) = screenSize()
                         val (cx, cy) = OverlayGestures.clampPosition(
                             params.x, params.y, params.width, params.height,
-                            resources.displayMetrics.widthPixels, resources.displayMetrics.heightPixels,
+                            screenW, screenH,
                         )
                         params.x = cx; params.y = cy
                         runCatching { windowManager.updateViewLayout(view, params) }
@@ -311,7 +316,7 @@ class OverlayControlService : Service() {
                 MotionEvent.ACTION_UP, MotionEvent.ACTION_CANCEL -> {
                     if (dragging && e.actionMasked == MotionEvent.ACTION_UP) {
                         val targetX = OverlayGestures.snapEdgeX(
-                            params.x, params.width, resources.displayMetrics.widthPixels,
+                            params.x, params.width, screenSize().first,
                         )
                         OverlayGestures.settle(view, params.x, targetX, { nx ->
                             params.x = nx
@@ -356,9 +361,10 @@ class OverlayControlService : Service() {
                         }
                         params.x = startX + (e.rawX - downRawX).toInt()
                         params.y = startY + (e.rawY - downRawY).toInt()
+                        val (screenW, screenH) = screenSize()
                         val (cx, cy) = OverlayGestures.clampPosition(
                             params.x, params.y, params.width, params.height,
-                            resources.displayMetrics.widthPixels, resources.displayMetrics.heightPixels,
+                            screenW, screenH,
                         )
                         params.x = cx; params.y = cy
                         runCatching { windowManager.updateViewLayout(view, params) }
@@ -369,7 +375,7 @@ class OverlayControlService : Service() {
                     if (e.actionMasked == MotionEvent.ACTION_UP) {
                         if (dragging) {
                             val targetX = OverlayGestures.snapEdgeX(
-                                params.x, params.width, resources.displayMetrics.widthPixels,
+                                params.x, params.width, screenSize().first,
                             )
                             OverlayGestures.settle(view, params.x, targetX, { nx ->
                                 params.x = nx
@@ -401,22 +407,63 @@ class OverlayControlService : Service() {
             WidgetKind.COMMAND -> null
             WidgetKind.MACRO -> OverlayStore.macroByWidgetId(w.id)?.let { MacroResolver.buildCommandAction(it) }
         }
-        if (action == null || action.steps.isEmpty()) {
+        if (action == null) {
+            Toast.makeText(this, "宏不存在，请重新录制", Toast.LENGTH_SHORT).show()
+            flashResult(w, view, false)
+            return
+        }
+        if (action.steps.isEmpty()) {
+            Toast.makeText(this, "宏为空，请重新录制", Toast.LENGTH_SHORT).show()
             flashResult(w, view, false)
             return
         }
         if (container.stateMachine.currentState() == VoiceState.EXECUTE) {
+            Toast.makeText(this, "语音指令正在执行，请稍候", Toast.LENGTH_SHORT).show()
             flashResult(w, view, false)
             return
+        }
+        // 旧录制器在横屏游戏里可能误用竖屏尺寸，把 x 全夹到 1080；这种宏回放必然看不到效果
+        val edgeTaps = action.steps.count { it is ExecStep.Tap && it.x >= MACRO_EDGE_X }
+        if (edgeTaps >= 2) {
+            Toast.makeText(
+                this,
+                "检测到 $edgeTaps 步坐标贴在屏幕右边缘，录制时可能方向不对，建议重新录制",
+                Toast.LENGTH_LONG,
+            ).show()
         }
         // CAS 必须在 serviceScope 内做：scope 已取消时直接放弃，避免锁泄漏到服务销毁后
         val scope = serviceScope ?: return
         scope.launch {
-            if (!executing.compareAndSet(false, true)) return@launch
+            if (!executing.compareAndSet(false, true)) {
+                Toast.makeText(
+                    this@OverlayControlService,
+                    "上一条宏还在执行，请稍候",
+                    Toast.LENGTH_SHORT,
+                ).show()
+                return@launch
+            }
             try {
                 // 手动回放走独立执行链：语音关闭后的取消令牌不得影响面板宏按钮
                 val outcome = runCatching { container.executeManual(action) }
-                val ok = outcome.getOrNull()?.success == true
+                val result = outcome.getOrNull()
+                val ok = result?.success == true
+                Log.d(
+                    "OverlayExec",
+                    "widget=${w.id} steps=${action.steps.size} ok=$ok msg=${result?.message ?: outcome.exceptionOrNull()?.message}",
+                )
+                if (!ok) {
+                    Toast.makeText(
+                        this@OverlayControlService,
+                        "宏执行失败：${result?.message ?: outcome.exceptionOrNull()?.message ?: "未知原因"}",
+                        Toast.LENGTH_LONG,
+                    ).show()
+                } else if (!gameVisible) {
+                    Toast.makeText(
+                        this@OverlayControlService,
+                        "已执行 ${action.steps.size} 步；当前不在游戏前台，可能看不到效果",
+                        Toast.LENGTH_LONG,
+                    ).show()
+                }
                 container.telemetry.event("exec", "overlay_${if (ok) "ok" else "fail"}_${w.id}")
                 flashResult(w, view, ok)
             } finally {
@@ -540,13 +587,13 @@ class OverlayControlService : Service() {
         )
         // 相对悬浮球定位：球在左半屏则面板放其右侧，反之放左侧；垂直以球为中心并夹在屏内
         val panelWidth = dp(264f)
-        val screen = resources.displayMetrics
+        val (screenW, screenH) = screenSize()
         val ballRect = ballPair?.second
-        val ballCx = if (ballRect != null) ballRect.x + ballRect.width / 2 else screen.widthPixels / 2
-        val ballCy = if (ballRect != null) ballRect.y + ballRect.height / 2 else screen.heightPixels / 2
+        val ballCx = if (ballRect != null) ballRect.x + ballRect.width / 2 else screenW / 2
+        val ballCy = if (ballRect != null) ballRect.y + ballRect.height / 2 else screenH / 2
         val gap = dp(12f)
-        var px = if (ballCx < screen.widthPixels / 2) ballCx + gap else ballCx - gap - panelWidth
-        px = px.coerceIn(dp(8f), (screen.widthPixels - panelWidth - dp(8f)).coerceAtLeast(dp(8f)))
+        var px = if (ballCx < screenW / 2) ballCx + gap else ballCx - gap - panelWidth
+        px = px.coerceIn(dp(8f), (screenW - panelWidth - dp(8f)).coerceAtLeast(dp(8f)))
         // 高度未知，先放左上角再测量后修正 y
         panelParams = WindowManager.LayoutParams(
             panelWidth, WindowManager.LayoutParams.WRAP_CONTENT,
@@ -567,7 +614,7 @@ class OverlayControlService : Service() {
             if (generation != panelGeneration || panelHolder?.root !== root) return@post
             val h = root.height
             if (h <= 0) return@post
-            params.y = (ballCy - h / 2).coerceIn(dp(8f), (screen.heightPixels - h - dp(8f)).coerceAtLeast(dp(8f)))
+            params.y = (ballCy - h / 2).coerceIn(dp(8f), (screenH - h - dp(8f)).coerceAtLeast(dp(8f)))
             runCatching { windowManager.updateViewLayout(root, params) }
         }
     }
@@ -604,6 +651,9 @@ class OverlayControlService : Service() {
     }
 
     private fun dp(v: Float): Int = (v * resources.displayMetrics.density).toInt()
+
+    /** 悬浮窗定位/夹取统一用当前显示尺寸，避免游戏横屏时仍按竖屏资源计算 */
+    private fun screenSize(): Pair<Int, Int> = DisplaySize.current(this)
 
     // ---------------- 录制宏 ----------------
 
@@ -767,7 +817,7 @@ class OverlayControlService : Service() {
         closePanel()
         recording = true
         refreshPendingCount()
-        val screen = resources.displayMetrics
+        val (screenW, _) = screenSize()
         val bar = OverlayViews.createRecordBar(this, OverlayViews.RecordBarCallbacks(
             onToggleRecord = { SnapshotCaptureActivity.start(this) },
             onUndo = {
@@ -788,7 +838,7 @@ class OverlayControlService : Service() {
                     params.width = if (collapsed) {
                         dp(148f)
                     } else {
-                        minOf(dp(380f), screen.widthPixels - dp(24f)).coerceAtLeast(dp(200f))
+                        minOf(dp(380f), screenW - dp(24f)).coerceAtLeast(dp(200f))
                     }
                     params.height = dp(64f)
                     recordBarView?.let { view ->
@@ -797,7 +847,7 @@ class OverlayControlService : Service() {
                 }
             },
         ))
-        val width = minOf(dp(380f), screen.widthPixels - dp(24f)).coerceAtLeast(dp(200f))
+        val width = minOf(dp(380f), screenW - dp(24f)).coerceAtLeast(dp(200f))
         recordBarParams = WindowManager.LayoutParams(
             width, dp(64f),
             WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY,
@@ -849,7 +899,7 @@ class OverlayControlService : Service() {
             onCancel = { closeVoiceConfirm() },
         )
         confirmParams = WindowManager.LayoutParams(
-            (resources.displayMetrics.widthPixels * 0.86f).toInt(),
+            (screenSize().first * 0.86f).toInt(),
             WindowManager.LayoutParams.WRAP_CONTENT,
             WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY,
             0,
@@ -881,7 +931,7 @@ class OverlayControlService : Service() {
             },
         )
         namingParams = WindowManager.LayoutParams(
-            (resources.displayMetrics.widthPixels * 0.8f).toInt(),
+            (screenSize().first * 0.8f).toInt(),
             WindowManager.LayoutParams.WRAP_CONTENT,
             WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY,
             0,
@@ -905,22 +955,25 @@ class OverlayControlService : Service() {
     // ---------------- 位置回写 ----------------
 
     private fun saveBallPosition(params: WindowManager.LayoutParams) {
-        val screen = resources.displayMetrics
-        val mx = (screen.widthPixels - params.width).coerceAtLeast(1).toFloat()
-        val my = (screen.heightPixels - params.height).coerceAtLeast(1).toFloat()
+        val (screenW, screenH) = screenSize()
+        val mx = (screenW - params.width).coerceAtLeast(1).toFloat()
+        val my = (screenH - params.height).coerceAtLeast(1).toFloat()
         OverlayStore.updateBallPosition(params.x / mx, params.y / my)
     }
 
     private fun saveWidgetPosition(widgetId: String, params: WindowManager.LayoutParams) {
-        val screen = resources.displayMetrics
-        val mx = (screen.widthPixels - params.width).coerceAtLeast(1).toFloat()
-        val my = (screen.heightPixels - params.height).coerceAtLeast(1).toFloat()
+        val (screenW, screenH) = screenSize()
+        val mx = (screenW - params.width).coerceAtLeast(1).toFloat()
+        val my = (screenH - params.height).coerceAtLeast(1).toFloat()
         OverlayStore.updateWidgetPosition(widgetId, params.x / mx, params.y / my)
     }
 
     companion object {
         /** 宏按钮在游戏中常驻：面板关闭后仍可点击回放（当前为固定行为，无 UI 开关） */
         const val keepButtonsWhenPanelClosed = true
+
+        /** 基准坐标 1080 宽，x>=1079 视为贴右边缘；多步如此通常意味着录制方向错了 */
+        private const val MACRO_EDGE_X = 1079
 
         fun start(context: Context) {
             if (!Settings.canDrawOverlays(context)) return

@@ -1,7 +1,9 @@
 package com.aixiaohuadb.adb
 
+import android.util.Log
 import android.view.Surface
 import com.aixiaohuadb.exec.CoordinateMapper
+import com.aixiaohuadb.exec.DisplaySize
 import com.aixiaohuadb.exec.ExecStep
 import com.aixiaohuadb.exec.GesturePoint
 import com.aixiaohuadb.exec.GesturePointer
@@ -447,10 +449,13 @@ class AdbTouchRecorder(
             return false
         }
 
-        val (screenWidth, screenHeight) = runCatching { adbClient.screenSizePx() }
+        val (rawWidth, rawHeight) = runCatching { adbClient.screenSizePx() }
             .getOrElse { return fail("读取屏幕尺寸失败：${it.message ?: "未知错误"}") }
-        if (screenWidth <= 0 || screenHeight <= 0) return fail("屏幕尺寸无效，无法录制")
+        if (rawWidth <= 0 || rawHeight <= 0) return fail("屏幕尺寸无效，无法录制")
         val rotation = runCatching { adbClient.displayRotation() }.getOrDefault(Surface.ROTATION_0)
+        // 后台进程资源可能仍是竖屏；旋转 90/270 时强制横屏宽高，避免 x 被夹到 1080
+        val (screenWidth, screenHeight) = DisplaySize.oriented(rawWidth, rawHeight, rotation)
+        Log.d("AdbTouchRecorder", "record screen=${screenWidth}x$screenHeight raw=${rawWidth}x$rawHeight rotation=$rotation")
 
         val listing = runCatching { adbClient.readShellOutput("getevent -pl") }.getOrNull()
             ?: return fail("未找到可监听的触摸设备（getevent 不可用）")
