@@ -224,7 +224,10 @@ fun SectionTitle(text: String, action: String? = null, onAction: () -> Unit = {}
 }
 
 @Composable
-fun InfoCard(content: @Composable ColumnScope.() -> Unit) {
+fun InfoCard(
+    contentPadding: androidx.compose.foundation.layout.PaddingValues = androidx.compose.foundation.layout.PaddingValues(Spacing.md),
+    content: @Composable ColumnScope.() -> Unit,
+) {
     Card(
         modifier = Modifier
             .fillMaxWidth()
@@ -233,8 +236,9 @@ fun InfoCard(content: @Composable ColumnScope.() -> Unit) {
         colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface),
         border = BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant),
         elevation = CardDefaults.cardElevation(defaultElevation = 1.dp),
-        content = content,
-    )
+    ) {
+        Column(modifier = Modifier.padding(contentPadding), content = content)
+    }
 }
 
 /** 带图标 / 标题 / 动作的区块卡，统一纵向节奏 */
@@ -248,7 +252,7 @@ fun SectionCard(
     content: @Composable ColumnScope.() -> Unit,
 ) {
     val tc = toneColors(tone)
-    InfoCard {
+    InfoCard(contentPadding = androidx.compose.foundation.layout.PaddingValues(0.dp)) {
         Row(
             modifier = Modifier
                 .fillMaxWidth()

@@ -27,6 +27,7 @@ import com.aixiaohuadb.machine.VoiceEvent
 import com.aixiaohuadb.machine.VoiceState
 import com.aixiaohuadb.machine.VoiceStateMachine
 import com.aixiaohuadb.monitor.Telemetry
+import com.aixiaohuadb.service.ControlMode
 import com.aixiaohuadb.service.VoiceAccessibilityService
 import com.aixiaohuadb.service.VoiceForegroundService
 import com.aixiaohuadb.adb.AdbClient
@@ -177,6 +178,28 @@ class AppContainer(private val context: Context) {
 
     fun refreshNotification() {
         VoiceForegroundService.runningInstance?.refresh()
+    }
+
+    /**
+     * 应用控制模式：真实启停语音链路，不依赖 UI ViewModel 转发副作用。
+     * 手动模式停采集+卸载模型（无常驻拾音）；语音模式恢复监听与采集。
+     * 在游戏内（Activity 后台）调用也能可靠生效。异步投放到 Default，避免阻塞调用线程。
+     */
+    fun applyControlMode(mode: ControlMode) {
+        scope.launch {
+            when (mode) {
+                ControlMode.MANUAL -> {
+                    unloadModels()
+                    stateMachine.enterManualMode()
+                }
+                ControlMode.VOICE -> {
+                    stateMachine.enterVoiceMode()
+                    loadModels()
+                    startCapture()
+                }
+            }
+            refreshNotification()
+        }
     }
 
     fun metricsFlow(): StateFlow<VoiceMetrics> = metrics

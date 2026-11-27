@@ -39,6 +39,7 @@ fun SettingsScreen(
     onVoiceprint: () -> Unit,
     onMapping: () -> Unit,
     onAdb: () -> Unit,
+    onOverlay: () -> Unit,
     onDebug: () -> Unit,
 ) {
     val config by vm.config.collectAsState()
@@ -77,6 +78,9 @@ fun SettingsScreen(
             }
             ToggleRow("首次退出二次确认", "防止误说导致不可用", config.controlWords.c1ConfirmOnFirst) {
                 vm.setExitConfirm(it)
+            }
+            Row(modifier = Modifier.fillMaxWidth()) {
+                QuietButton(text = "悬浮控制", onClick = onOverlay)
             }
             Text(
                 "控制词：退出唤醒 / 退出识别 / 暂停 / 恢复",

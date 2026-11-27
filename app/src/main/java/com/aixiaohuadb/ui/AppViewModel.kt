@@ -16,7 +16,7 @@ import com.aixiaohuadb.machine.FeedbackType
 import com.aixiaohuadb.machine.SideEffect
 import com.aixiaohuadb.machine.VoiceEvent
 import com.aixiaohuadb.machine.VoiceState
-import com.aixiaohuadb.service.FloatingBallService
+import com.aixiaohuadb.service.OverlayControlService
 import com.aixiaohuadb.service.VoiceForegroundService
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
@@ -129,7 +129,7 @@ class AppViewModel(private val container: AppContainer) : ViewModel() {
 
     fun startServices(context: Context) {
         VoiceForegroundService.start(context.applicationContext)
-        FloatingBallService.start(context.applicationContext)
+        OverlayControlService.start(context.applicationContext)
     }
 
     fun dismissToast() = _ui.update { it.copy(toast = null) }

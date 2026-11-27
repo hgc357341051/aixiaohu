@@ -53,6 +53,29 @@ class VoiceStateMachineTest {
     }
 
     @Test
+    fun `控制模式切换 手动停语音 语音模式恢复监听 且不产生副作用`() = runTest {
+        val sm = VoiceStateMachine(testConfig())
+        val effects = mutableListOf<SideEffect>()
+        collectEffects(sm, effects)
+        sm.send(VoiceEvent.Start)
+        assertEquals(VoiceState.LISTEN, sm.currentState())
+        effects.clear()
+
+        // 切到手动模式：直接进入静默态，不在此发副作用（由 AppContainer 显式启停）
+        sm.enterManualMode()
+        assertEquals(VoiceState.MANUAL_SILENT, sm.currentState())
+        assertTrue(effects.isEmpty())
+        sm.send(VoiceEvent.CoarseHit)
+        sm.send(VoiceEvent.WakeVerified(1f))
+        assertEquals(VoiceState.MANUAL_SILENT, sm.currentState())
+
+        // 切回语音模式：恢复监听
+        sm.enterVoiceMode()
+        assertEquals(VoiceState.LISTEN, sm.currentState())
+        sm.close()
+    }
+
+    @Test
     fun `C1 首次二次确认 真退出后仅认手动恢复`() = runTest {
         val sm = VoiceStateMachine(testConfig())
         val effects = mutableListOf<SideEffect>()

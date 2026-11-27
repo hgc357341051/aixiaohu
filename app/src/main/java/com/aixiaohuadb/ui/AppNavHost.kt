@@ -5,6 +5,7 @@ import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.systemBarsPadding
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
@@ -33,6 +34,8 @@ import com.aixiaohuadb.ui.home.HomeScreen
 import com.aixiaohuadb.ui.mapping.MappingScreen
 import com.aixiaohuadb.ui.mapping.MappingViewModel
 import com.aixiaohuadb.ui.onboarding.OnboardingScreen
+import com.aixiaohuadb.ui.overlay.OverlayControlScreen
+import com.aixiaohuadb.ui.overlay.OverlayControlViewModel
 import com.aixiaohuadb.ui.panel.PanelScreen
 import com.aixiaohuadb.ui.permissions.PermissionsScreen
 import com.aixiaohuadb.ui.settings.SettingsScreen
@@ -83,7 +86,7 @@ fun AppNavHost(vm: AppViewModel, container: AppContainer, context: Context) {
         }
     }
 
-    Box(modifier = Modifier.fillMaxSize()) {
+    Box(modifier = Modifier.fillMaxSize().systemBarsPadding()) {
         NavHost(navController = nav, startDestination = "onboarding") {
             composable("onboarding") {
                 OnboardingScreen(
@@ -124,7 +127,16 @@ fun AppNavHost(vm: AppViewModel, container: AppContainer, context: Context) {
                     onVoiceprint = { nav.navigate("voiceprint") },
                     onMapping = { nav.navigate("mapping") },
                     onAdb = { nav.navigate("adb") },
+                    onOverlay = { nav.navigate("overlay") },
                     onDebug = { if (BuildConfig.DEBUG_PAGE_VISIBLE) nav.navigate("debug") },
+                )
+            }
+
+            composable("overlay") {
+                OverlayControlScreen(
+                    vm = viewModel(factory = SimpleVmFactory { OverlayControlViewModel() }),
+                    onBack = { nav.popBackStack() },
+                    onTab = navigateTab,
                 )
             }
             composable("voiceprint") {

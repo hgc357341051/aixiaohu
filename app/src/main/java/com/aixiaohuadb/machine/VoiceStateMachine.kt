@@ -80,6 +80,25 @@ class VoiceStateMachine(private val configProvider: () -> AppConfig = { AppConfi
 
     fun currentState(): VoiceState = _state.value
 
+    /**
+     * 控制模式切换专用入口：只做状态迁移，不产生语音副作用。
+     *
+     * 背景：普通语音副作用由 AppViewModel 转发 ControlActionHandler 落地，但用户在游戏内时
+     * Activity 可能已销毁、ViewModel 不再存活，副作用无人消费。模式切换必须真实启停采集/模型，
+     * 因此由 AppContainer 在进程 scope 内显式执行，这里仅负责把机态切到正确的稳定态。
+     */
+    fun enterManualMode() = synchronized(lock) {
+        timer?.cancel()
+        c1ConfirmedOnce = true
+        pendingC1 = false
+        _state.value = VoiceState.MANUAL_SILENT
+    }
+
+    fun enterVoiceMode() = synchronized(lock) {
+        errorCount = 0
+        transition(VoiceState.LISTEN)
+    }
+
     fun send(event: VoiceEvent) = synchronized(lock) {
         val current = _state.value
         if (current == VoiceState.MANUAL_SILENT &&

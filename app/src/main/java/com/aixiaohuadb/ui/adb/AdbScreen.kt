@@ -73,7 +73,7 @@ fun AdbScreen(
 
         s.message?.let { msg ->
             Spacer(Modifier.height(Spacing.sm))
-            InfoCard {
+            InfoCard(contentPadding = androidx.compose.foundation.layout.PaddingValues(0.dp)) {
                 Row(
                     modifier = Modifier.padding(Spacing.md),
                     verticalAlignment = Alignment.CenterVertically,
@@ -173,7 +173,7 @@ fun AdbScreen(
 
         SectionTitle(text = "真机环境")
         InfoCard {
-            Column(modifier = Modifier.padding(Spacing.md)) {
+            Column {
                 EnvRow("系统版本", "Android ${s.status.env.sdkInt}")
                 EnvRow("支持无线配对", if (s.status.env.supportsWirelessPairing) "是（Android 11+）" else "否")
                 EnvRow("屏幕分辨率", "${s.status.env.screenWidth} × ${s.status.env.screenHeight}")
@@ -212,7 +212,7 @@ private fun StatusHero(phase: AdbPhase, onRecheck: () -> Unit) {
             Icons.Filled.Computer, Tone.WARN, "尚未就绪", "请先开启开发者选项与无线调试"
         )
     }
-    InfoCard {
+    InfoCard(contentPadding = androidx.compose.foundation.layout.PaddingValues(0.dp)) {
         Row(
             modifier = Modifier.padding(Spacing.md),
             verticalAlignment = Alignment.CenterVertically,
