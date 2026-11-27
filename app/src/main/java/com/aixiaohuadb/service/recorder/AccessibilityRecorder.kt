@@ -10,6 +10,7 @@ import android.util.Log
 import android.view.Gravity
 import android.view.MotionEvent
 import android.view.View
+import android.view.ViewGroup
 import android.view.WindowManager
 import android.widget.LinearLayout
 import android.widget.TextView
@@ -72,6 +73,8 @@ class AccessibilityRecorder(
     private var startedAtMs = 0L
     /** 启动后的短暂窗口：忽略触发录制的这次触摸，避免把"点新建宏"本身录成一步。 */
     private var acceptInputFromMs = 0L
+    /** 暂停 = 录制层透传给游戏，不再记录也不转发 */
+    private var paused = false
     private var lastUpAtMs = 0L
     private var ticker: Job? = null
     private var running = false
@@ -118,6 +121,7 @@ class AccessibilityRecorder(
         steps.clear()
         startedAtMs = SystemClock.elapsedRealtime()
         acceptInputFromMs = startedAtMs + 350L
+        paused = false
         lastUpAtMs = startedAtMs
         running = true
         showChip()
@@ -158,7 +162,7 @@ class AccessibilityRecorder(
     }
 
     private fun handleGesture(gesture: RecordedGesture) {
-        if (!running) return
+        if (!running || paused) return
         if (gesture.downAtMs < acceptInputFromMs) return
         // 每次手势都重新取当前显示尺寸：录制中切横屏/竖屏时，
         // 用启动时的旧尺寸归一化会把坐标算到屏幕外。
@@ -260,7 +264,8 @@ class AccessibilityRecorder(
                         service.multiGesture(pointers, duration)
                     }
                 } finally {
-                    setTouchable(true)
+                    // 暂停期间不能恢复成可触摸，否则透传会被打断
+                    setTouchable(!paused)
                 }
             }
         }
@@ -279,39 +284,65 @@ class AccessibilityRecorder(
 
     private fun showChip() {
         if (chip != null) return
+
+        fun chipButton(label: String, primary: Boolean, onClick: () -> Unit) = TextView(context).apply {
+            text = label
+            textSize = 11f
+            setTextColor(Color.WHITE)
+            gravity = Gravity.CENTER
+            minWidth = dp(52f)
+            minHeight = dp(36f)
+            setPadding(dp(10f), 0, dp(10f), 0)
+            background = GradientDrawable().apply {
+                cornerRadius = dp(12f).toFloat()
+                setColor(if (primary) 0xFF0E7490.toInt() else 0xFF16202E.toInt())
+                setStroke(dp(1f), if (primary) 0xFF2DD4BF.toInt() else 0xFF334155.toInt())
+            }
+            setOnClickListener { onClick() }
+        }
+
         val root = LinearLayout(context).apply {
             orientation = LinearLayout.HORIZONTAL
             gravity = Gravity.CENTER_VERTICAL
+            // 整个胶囊可点：点空白处不该穿透到游戏，否则看起来像"点了没反应"
+            isClickable = true
             background = GradientDrawable().apply {
-                cornerRadius = dp(22f).toFloat()
+                cornerRadius = dp(20f).toFloat()
                 setColor(0xFF0B1220.toInt())
                 setStroke(dp(1f), 0xFFEF4444.toInt())
             }
-            setPadding(dp(14f), dp(8f), dp(8f), dp(8f))
+            setPadding(dp(10f), dp(5f), dp(6f), dp(5f))
         }
-        val label = TextView(context).apply {
-            text = "● 录制中 00:00 · 0 步"
-            setTextColor(Color.WHITE)
-            textSize = 12f
-            tag = "record_label"
-        }
-        root.addView(label)
+
         root.addView(TextView(context).apply {
-            text = "完成"
+            // 文案必须短：长文案会把「完成 / 取消」挤出屏幕，触摸区域跟着丢
+            text = "● 00:00 · 0 步"
             setTextColor(Color.WHITE)
-            textSize = 12f
-            setPadding(dp(12f), dp(6f), dp(12f), dp(6f))
-            background = GradientDrawable().apply {
-                cornerRadius = dp(14f).toFloat()
-                setColor(0xFF0E7490.toInt())
-            }
-            setOnClickListener { listener.onFinishRequested() }
+            textSize = 11f
+            maxLines = 1
+            tag = "record_label"
+            setPadding(0, 0, dp(8f), 0)
+        })
+        root.addView(chipButton("暂停", primary = false) { togglePause() }.apply {
+            tag = "record_pause"
+            layoutParams = LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.WRAP_CONTENT,
+                dp(36f),
+            ).apply { rightMargin = dp(4f) }
+        })
+        root.addView(chipButton("完成", primary = true) { listener.onFinishRequested() }.apply {
+            layoutParams = LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.WRAP_CONTENT,
+                dp(36f),
+            ).apply { rightMargin = dp(2f) }
         })
         root.addView(TextView(context).apply {
             text = "×"
             setTextColor(0xFFEF4444.toInt())
             textSize = 16f
-            setPadding(dp(12f), dp(2f), dp(6f), dp(6f))
+            gravity = Gravity.CENTER
+            minWidth = dp(32f)
+            minHeight = dp(36f)
             setOnClickListener { listener.onCancelRequested() }
         })
 
@@ -319,15 +350,39 @@ class AccessibilityRecorder(
             WindowManager.LayoutParams.WRAP_CONTENT,
             WindowManager.LayoutParams.WRAP_CONTENT,
             WindowManager.LayoutParams.TYPE_ACCESSIBILITY_OVERLAY,
-            WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE,
+            WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE
+                or WindowManager.LayoutParams.FLAG_LAYOUT_IN_SCREEN,
             PixelFormat.TRANSLUCENT,
         ).apply {
             gravity = Gravity.TOP or Gravity.CENTER_HORIZONTAL
-            y = dp(28f)
+            // 72dp 而不是 28dp：28dp 会压到状态栏/刘海，触摸被 SystemUI 接走
+            y = dp(72f)
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
+                layoutInDisplayCutoutMode =
+                    WindowManager.LayoutParams.LAYOUT_IN_DISPLAY_CUTOUT_MODE_SHORT_EDGES
+            }
         }
         val chipResult = runCatching { windowManager.addView(root, params) }
         Log.d("AccessibilityRecorder", "chip addView ok=${chipResult.isSuccess} err=${chipResult.exceptionOrNull()?.message}")
         chip = root
+    }
+
+    /**
+     * 暂停 / 继续录制。
+     *
+     * 暂停时录制层切到 NOT_TOUCHABLE：触摸直接落到游戏，用户可以正常操作，
+     * 但不会被录进宏。这是"透传开关"的实现，不需要用户退出录制。
+     */
+    fun togglePause(): Boolean {
+        if (!running) return false
+        paused = !paused
+        setTouchable(!paused)
+        // 恢复瞬间的那次抬手会落在刚变可触摸的录制层上，忽略掉，避免多点出一步
+        if (!paused) acceptInputFromMs = SystemClock.elapsedRealtime() + 250L
+        chip?.findViewWithTag<TextView>("record_pause")?.text = if (paused) "继续" else "暂停"
+        chip?.findViewWithTag<TextView>("record_label")?.text =
+            if (paused) "⏸ 已暂停 · ${steps.size} 步" else "● 录制中 · ${steps.size} 步"
+        return paused
     }
 
     private fun removeOverlay() {
@@ -343,8 +398,12 @@ class AccessibilityRecorder(
 
     fun updateChip(elapsedMs: Long, stepCount: Int) {
         val label = chip?.findViewWithTag<TextView>("record_label") ?: return
+        if (paused) {
+            label.text = "⏸ 已暂停 · $stepCount 步"
+            return
+        }
         val totalSeconds = (elapsedMs / 1000L).toInt()
-        label.text = "● 录制中 %02d:%02d · %d 步".format(totalSeconds / 60, totalSeconds % 60, stepCount)
+        label.text = "● %02d:%02d · %d 步".format(totalSeconds / 60, totalSeconds % 60, stepCount)
     }
 
     private fun dp(value: Float): Int =

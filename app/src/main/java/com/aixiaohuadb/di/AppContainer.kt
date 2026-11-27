@@ -121,19 +121,26 @@ class AppContainer(private val context: Context) {
      * 按 guard 构造一条完整执行链。语音链与手动链各自独立构造，
      * 保证 disable 只能打断语音宏，不能影响用户从面板/设置发起的手动回放。
      */
+    /**
+     * 执行优先级：内嵌 ADB（主）→ 无障碍（备）→ 只读提示。
+     *
+     * ADB 走的是设备输入子系统，游戏把它当真实触摸，不会命中"无障碍注入"检测；
+     * 未连接时 [AdbInputExecutor.isAvailable] 为 false，自动落到无障碍手势。
+     * 无障碍仍是录音/语音链路的兜底，两条链路共用同一份基准坐标映射。
+     */
     private fun buildExecutorChain(guard: ExecutionGuard): ExecutorChain = ExecutorChain(
         listOf(
-            AccessibilityExecutor(
-                { VoiceAccessibilityService.instance },
-                coordinateMapper,
-                ::screenSize,
-                guard = guard,
-            ),
             AdbInputExecutor(
                 client = adbClient,
                 mapper = coordinateMapper,
                 screenSizeProvider = ::screenSize,
                 isAvailableProvider = { adbClient.status.value.phase == AdbPhase.CONNECTED },
+                guard = guard,
+            ),
+            AccessibilityExecutor(
+                { VoiceAccessibilityService.instance },
+                coordinateMapper,
+                ::screenSize,
                 guard = guard,
             ),
             ReadOnlyExecutor,

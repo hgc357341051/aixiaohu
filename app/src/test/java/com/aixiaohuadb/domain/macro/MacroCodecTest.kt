@@ -122,6 +122,21 @@ class MacroCodecTest {
     }
 
     @Test
+    fun `第一步的等待前置成 Wait 而不是变成步后延迟`() {
+        val steps = MacroAdapter.toExecSteps(
+            listOf(
+                MacroStep.Tap(x = 0.1f, y = 0.1f, delayBeforeMs = 500L),
+                MacroStep.Tap(x = 0.2f, y = 0.2f, delayBeforeMs = 300L),
+            ),
+        )
+        assertEquals(3, steps.size)
+        val wait = steps[0] as ExecStep.Wait
+        assertEquals(500L, wait.ms)
+        assertEquals(0L, (steps[1] as ExecStep.Tap).delayAfterMs)
+        assertEquals(300L, (steps[2] as ExecStep.Tap).delayAfterMs)
+    }
+
+    @Test
     fun `估算时长包含等待与手势`() {
         val value = doc(
             MacroStep.Tap(x = 0.1f, y = 0.1f, durationMs = 60),

@@ -68,5 +68,18 @@ class NoGameTouchCaptureLayerTest {
         val recorder = read("src/main/java/com/aixiaohuadb/service/recorder/AccessibilityRecorder.kt")
         assertTrue("录制层必须是无障碍覆盖层", recorder.contains("TYPE_ACCESSIBILITY_OVERLAY"))
         assertTrue("转发期间必须切 NOT_TOUCHABLE", recorder.contains("FLAG_NOT_TOUCHABLE"))
+        assertTrue("必须提供暂停透传", recorder.contains("fun togglePause()"))
+    }
+
+    @Test
+    fun `宏回放默认走 ADB 而不是无障碍`() {
+        val container = read("src/main/java/com/aixiaohuadb/di/AppContainer.kt")
+        val adbIndex = container.indexOf("AdbInputExecutor(")
+        val accessibilityIndex = container.indexOf("AccessibilityExecutor(")
+        assertTrue("AppContainer 里应同时存在两条链路", adbIndex >= 0 && accessibilityIndex >= 0)
+        assertTrue(
+            "ADB 执行器必须排在无障碍之前：input 注入不会被游戏当成无障碍点击",
+            adbIndex < accessibilityIndex,
+        )
     }
 }

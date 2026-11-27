@@ -340,10 +340,19 @@ private fun StepEditorRow(
                         onValueChange = { onUpdate(step.withDuration(it.roundToInt())) },
                         valueRange = minMs.toFloat()..maxMs.toFloat(),
                     )
+                    Spacer(Modifier.height(Spacing.sm))
+                    // 延迟可编辑：录制只能给出"上一次抬手到这一次按下"的估算，
+                    // 游戏加载/动画需要更长的固定等待，必须让用户自己调。
+                    val delayMs = step.delayBeforeMs.coerceIn(0L, STEP_DELAY_CEILING_MS.toLong()).toInt()
                     Text(
-                        "执行前等待 ${step.delayBeforeMs} ms（录制自动生成）",
+                        "等待 $delayMs ms 再执行",
                         style = MaterialTheme.typography.labelSmall,
-                        color = Muted,
+                        color = Ink2,
+                    )
+                    Slider(
+                        value = delayMs.toFloat(),
+                        onValueChange = { onUpdate(step.withDelayBefore(it.toLong())) },
+                        valueRange = 0f..STEP_DELAY_CEILING_MS.toFloat(),
                     )
                     Spacer(Modifier.height(Spacing.sm))
                     SecondaryButton(
@@ -481,6 +490,9 @@ private fun MissingMacro(onBack: () -> Unit) {
 /** 交互步骤时长滑条上限：与视觉规范 3s 对齐，超出量程的录制值夹紧显示 */
 private const val STEP_DURATION_CEILING_MS = 3_000
 
+/** 步骤前等待的滑条上限；超过 5 秒的等待用「等待」步骤表达更清楚 */
+private const val STEP_DELAY_CEILING_MS = 5_000
+
 private data class StepVisual(val label: String, val container: Color, val content: Color)
 
 private fun stepVisual(step: MacroStep): StepVisual = when (step) {
@@ -513,6 +525,17 @@ private fun MacroStep.withDuration(ms: Int): MacroStep = when (this) {
     is MacroStep.Swipe -> copy(durationMs = ms)
     is MacroStep.LongPress -> copy(durationMs = ms)
     is MacroStep.Wait -> copy(waitMs = ms.toLong().coerceAtLeast(0L))
+}
+
+/** 改写步骤前等待：同样保留 id */
+private fun MacroStep.withDelayBefore(ms: Long): MacroStep {
+    val safe = ms.coerceIn(0L, STEP_DELAY_CEILING_MS.toLong())
+    return when (this) {
+        is MacroStep.Tap -> copy(delayBeforeMs = safe)
+        is MacroStep.Swipe -> copy(delayBeforeMs = safe)
+        is MacroStep.LongPress -> copy(delayBeforeMs = safe)
+        is MacroStep.Wait -> copy(delayBeforeMs = safe)
+    }
 }
 
 /** 相邻交换：先移除再插入，越界直接忽略 */

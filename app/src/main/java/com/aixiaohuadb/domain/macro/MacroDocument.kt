@@ -126,50 +126,60 @@ object MacroAdapter {
 
     fun toExecSteps(doc: MacroDocument): List<ExecStep> = toExecSteps(doc.steps)
 
-    fun toExecSteps(steps: List<MacroStep>): List<ExecStep> = steps.map { step ->
-        when (step) {
-            is MacroStep.Tap -> ExecStep.Tap(
-                x = baseX(step.x),
-                y = baseY(step.y),
-                key = "tap",
-                delayAfterMs = step.delayBeforeMs,
-            )
-
-            is MacroStep.Swipe -> {
-                val from = basePoint(step.start)
-                val to = basePoint(step.end)
-                ExecStep.Swipe(
-                    fromX = from.first,
-                    fromY = from.second,
-                    toX = to.first,
-                    toY = to.second,
-                    durationMs = step.durationMs.coerceIn(
-                        MacroStep.MIN_DURATION_MS,
-                        MacroStep.MAX_DURATION_MS,
-                    ),
-                    delayAfterMs = step.delayBeforeMs,
-                )
+    fun toExecSteps(steps: List<MacroStep>): List<ExecStep> {
+        val out = ArrayList<ExecStep>(steps.size + 1)
+        steps.forEachIndexed { index, step ->
+            // 执行器只有"步后延迟"，第一步的 delayBeforeMs 如果直接映射，
+            // 会变成整个宏跑完才等待。这里把它前置成显式 Wait。
+            if (index == 0 && step.delayBeforeMs > 0L) {
+                out += ExecStep.Wait(step.delayBeforeMs)
             }
-
-            is MacroStep.LongPress -> {
-                // 执行链没有独立长按动作：用 1px、长时长的 swipe 表达，
-                // ADB 与无障碍两条链路都能落到同一个物理行为。
-                val (x, y) = basePoint(NormPoint.of(step.x, step.y))
-                ExecStep.Swipe(
-                    fromX = x,
-                    fromY = y,
-                    toX = (x + 1).coerceAtMost(BASE_WIDTH - 1),
-                    toY = y,
-                    durationMs = step.durationMs.coerceIn(
-                        MacroStep.MIN_DURATION_MS,
-                        MacroStep.MAX_DURATION_MS,
-                    ),
-                    delayAfterMs = step.delayBeforeMs,
+            val delayAfter = if (index == 0) 0L else step.delayBeforeMs
+            out += when (step) {
+                is MacroStep.Tap -> ExecStep.Tap(
+                    x = baseX(step.x),
+                    y = baseY(step.y),
+                    key = "tap",
+                    delayAfterMs = delayAfter,
                 )
-            }
 
-            is MacroStep.Wait -> ExecStep.Wait(step.waitMs)
+                is MacroStep.Swipe -> {
+                    val from = basePoint(step.start)
+                    val to = basePoint(step.end)
+                    ExecStep.Swipe(
+                        fromX = from.first,
+                        fromY = from.second,
+                        toX = to.first,
+                        toY = to.second,
+                        durationMs = step.durationMs.coerceIn(
+                            MacroStep.MIN_DURATION_MS,
+                            MacroStep.MAX_DURATION_MS,
+                        ),
+                        delayAfterMs = delayAfter,
+                    )
+                }
+
+                is MacroStep.LongPress -> {
+                    // 执行链没有独立长按动作：用 1px、长时长的 swipe 表达，
+                    // ADB 与无障碍两条链路都能落到同一个物理行为。
+                    val (x, y) = basePoint(NormPoint.of(step.x, step.y))
+                    ExecStep.Swipe(
+                        fromX = x,
+                        fromY = y,
+                        toX = (x + 1).coerceAtMost(BASE_WIDTH - 1),
+                        toY = y,
+                        durationMs = step.durationMs.coerceIn(
+                            MacroStep.MIN_DURATION_MS,
+                            MacroStep.MAX_DURATION_MS,
+                        ),
+                        delayAfterMs = delayAfter,
+                    )
+                }
+
+                is MacroStep.Wait -> ExecStep.Wait(step.waitMs)
+            }
         }
+        return out
     }
 
     /** 录制/导入的基准坐标步骤 → 强类型文档步骤，保证旧宏能进入新编辑器。 */
