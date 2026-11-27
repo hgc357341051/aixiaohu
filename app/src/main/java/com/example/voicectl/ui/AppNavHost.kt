@@ -27,8 +27,6 @@ import com.example.voicectl.BuildConfig
 import com.example.voicectl.di.AppContainer
 import com.example.voicectl.machine.VoiceState
 import com.example.voicectl.machine.ui
-import com.example.voicectl.ui.adb.AdbScreen
-import com.example.voicectl.ui.adb.AdbViewModel
 import com.example.voicectl.ui.debug.DebugScreen
 import com.example.voicectl.ui.debug.DebugViewModel
 import com.example.voicectl.ui.home.HomeScreen
@@ -39,6 +37,8 @@ import com.example.voicectl.ui.panel.PanelScreen
 import com.example.voicectl.ui.permissions.PermissionsScreen
 import com.example.voicectl.ui.settings.SettingsScreen
 import com.example.voicectl.ui.settings.SettingsViewModel
+import com.example.voicectl.ui.shizuku.ShizukuScreen
+import com.example.voicectl.ui.shizuku.ShizukuViewModel
 import com.example.voicectl.ui.theme.Panel
 import com.example.voicectl.ui.theme.PanelInk
 import com.example.voicectl.ui.theme.PillShape
@@ -143,11 +143,11 @@ fun AppNavHost(vm: AppViewModel, container: AppContainer, context: Context) {
                     },
                 )
             }
+            // 路由名保留 "adb" 以最小化导航改动，实现已整体换成 Shizuku 强类型链路
             composable("adb") {
-                AdbScreen(
-                    vm = viewModel(factory = SimpleVmFactory { AdbViewModel(container) }),
+                ShizukuScreen(
+                    vm = viewModel(factory = SimpleVmFactory { ShizukuViewModel(container, context) }),
                     onBack = { nav.popBackStack() },
-                    onMapping = { nav.navigate("mapping") },
                     onTab = navigateTab,
                 )
             }

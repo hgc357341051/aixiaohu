@@ -13,7 +13,15 @@ sealed class ExecStep {
     data class Verify(val key: String) : ExecStep()
 }
 
-data class ExecResult(val success: Boolean, val message: String = "")
+/**
+ * [attempted] 表示本执行器是否已经真实派发过至少一条点击命令。
+ * 一旦为 true，失败时执行链禁止降级重试，否则会造成同一 action 被重复点击。
+ */
+data class ExecResult(
+    val success: Boolean,
+    val message: String = "",
+    val attempted: Boolean = false,
+)
 
 interface Executor {
     val name: String

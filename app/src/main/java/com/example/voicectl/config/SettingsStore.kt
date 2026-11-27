@@ -31,7 +31,7 @@ class SettingsStore(private val context: Context) {
         val TAU_COARSE = floatPreferencesKey("tau_coarse")
         val TAU_FINE = floatPreferencesKey("tau_fine")
         val TAU_CMD = floatPreferencesKey("tau_cmd")
-        val ADB_BASE_URL = stringPreferencesKey("adb_base_url")
+        val SHIZUKU_EVER_AUTHORIZED = booleanPreferencesKey("shizuku_ever_authorized")
     }
 
     val configFlow: Flow<AppConfig> = context.settingsDataStore.data.map { p ->
@@ -56,13 +56,11 @@ class SettingsStore(private val context: Context) {
             feedbackVibration = p[Keys.FEEDBACK_VIBRATION] ?: defaults.feedbackVibration,
             feedbackOverlay = p[Keys.FEEDBACK_OVERLAY] ?: defaults.feedbackOverlay,
             tempAllow = p[Keys.TEMP_ALLOW] ?: defaults.tempAllow,
+            everShizukuAuthorized = p[Keys.SHIZUKU_EVER_AUTHORIZED] ?: defaults.everShizukuAuthorized,
             decode = defaults.decode.copy(
                 tauCoarse = p[Keys.TAU_COARSE] ?: defaults.decode.tauCoarse,
                 tauFine = p[Keys.TAU_FINE] ?: defaults.decode.tauFine,
                 tauCmd = p[Keys.TAU_CMD] ?: defaults.decode.tauCmd,
-            ),
-            exec = defaults.exec.copy(
-                adbBaseUrl = p[Keys.ADB_BASE_URL] ?: defaults.exec.adbBaseUrl,
             ),
         )
     }
@@ -92,5 +90,5 @@ class SettingsStore(private val context: Context) {
     suspend fun setTauCoarse(value: Float) = put(Keys.TAU_COARSE, value)
     suspend fun setTauFine(value: Float) = put(Keys.TAU_FINE, value)
     suspend fun setTauCmd(value: Float) = put(Keys.TAU_CMD, value)
-    suspend fun setAdbBaseUrl(value: String) = put(Keys.ADB_BASE_URL, value)
+    suspend fun setShizukuEverAuthorized(value: Boolean) = put(Keys.SHIZUKU_EVER_AUTHORIZED, value)
 }

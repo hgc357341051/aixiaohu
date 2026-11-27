@@ -12,7 +12,7 @@ enum class Recovery { MANUAL_ONLY, AUTO }
 enum class GateMode { AND_HARD, SOFT }
 
 /** 执行链路类型 */
-enum class ExecKind { ACCESSIBILITY, ADB, READ_ONLY }
+enum class ExecKind { ACCESSIBILITY, SHIZUKU, READ_ONLY }
 
 /** 灵敏度档位，映射为各判决阈值偏移 */
 enum class Sensitivity { CONSERVATIVE, STANDARD, SENSITIVE }
@@ -78,12 +78,11 @@ data class SpeakerConfig(
 
 data class ExecConfig(
     val primary: ExecKind = ExecKind.ACCESSIBILITY,
-    val fallback: ExecKind = ExecKind.ADB,
+    val fallback: ExecKind = ExecKind.SHIZUKU,
     val coordBase: BaseSize = BaseSize(1080, 2340),
     val heartbeatS: Int = 5,
     val reconnectMax: Int = 3,
     val retryMax: Int = 1,
-    val adbBaseUrl: String = "http://192.168.1.23:8080",
 )
 
 /** §14 统一配置的运行时子集；开关由 DataStore 持久化后覆盖默认值 */
@@ -101,6 +100,8 @@ data class AppConfig(
     val feedbackVibration: Boolean = true,
     val feedbackOverlay: Boolean = true,
     val tempAllow: Boolean = false,
+    /** 曾获得 Shizuku 授权的持久化标记，用于冷启动识别 AUTHORIZATION_LOST */
+    val everShizukuAuthorized: Boolean = false,
 ) {
     companion object {
         val DEFAULT: AppConfig = AppConfig()

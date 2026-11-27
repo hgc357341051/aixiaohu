@@ -121,7 +121,7 @@ fun MappingScreen(vm: MappingViewModel, onBack: () -> Unit, onTab: (String) -> U
                         StatusBadge(text = "失败即停", tone = Tone.OK)
                     }
                 }
-                CodeBlock(title = "ADB 命令示意 · 不在端内执行", code = vm.previewCode())
+                CodeBlock(title = "输入命令示意 · 不在端内拼接字符串命令", code = vm.previewCode())
                 InfoCard {
                     Text(
                         "每步点击后校验 UI 状态，失败立即停止序列，重试 ≤1 次，避免半执行误换装。",

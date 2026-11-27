@@ -1,6 +1,7 @@
 package com.example.voicectl.di
 
 import android.content.Context
+import android.content.res.Resources
 import com.example.voicectl.audio.AudioCapture
 import com.example.voicectl.audio.FeatureExtractor
 import com.example.voicectl.audio.FrontEnd
@@ -12,8 +13,6 @@ import com.example.voicectl.domain.RecognizeUseCase
 import com.example.voicectl.domain.VoiceMetrics
 import com.example.voicectl.domain.WakeUseCase
 import com.example.voicectl.exec.AccessibilityExecutor
-import com.example.voicectl.exec.AdbClient
-import com.example.voicectl.exec.AdbExecutor
 import com.example.voicectl.exec.CoordinateMapper
 import com.example.voicectl.exec.ExecutorChain
 import com.example.voicectl.exec.Executor
@@ -30,6 +29,12 @@ import com.example.voicectl.machine.VoiceStateMachine
 import com.example.voicectl.monitor.Telemetry
 import com.example.voicectl.service.VoiceAccessibilityService
 import com.example.voicectl.service.VoiceForegroundService
+import com.example.voicectl.shizuku.InputBridge
+import com.example.voicectl.shizuku.InputBridgeImpl
+import com.example.voicectl.shizuku.ShizukuClient
+import com.example.voicectl.shizuku.ShizukuClientImpl
+import com.example.voicectl.shizuku.ShizukuInputExecutor
+import com.example.voicectl.shizuku.ShizukuPhase
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
@@ -55,9 +60,6 @@ class AppContainer(private val context: Context) {
         private set
 
     @Volatile
-    private var adbClient: AdbClient = AdbClient(AppConfig.DEFAULT.exec.adbBaseUrl)
-
-    @Volatile
     private var inferenceFactory: InferenceFactory = DemoInferenceFactory()
 
     val stateMachine = VoiceStateMachine({ config })
@@ -69,17 +71,28 @@ class AppContainer(private val context: Context) {
     val isDemoMode: Boolean get() = inferenceFactory is DemoInferenceFactory
     val modelVersion: String get() = if (isDemoMode) "demo-1.0.0" else tfliteFactory.modelVersion
 
-    private val adbExecutor = AdbExecutor(
-        clientProvider = { adbClient },
+    /** Shizuku 客户端与 shell 进程输入桥：唯一的备用执行链路 */
+    val shizukuClient: ShizukuClient = ShizukuClientImpl(context.applicationContext, settingsStore)
+    val shizukuBridge: InputBridge = InputBridgeImpl(context.applicationContext, shizukuClient)
+
+    private val shizukuExecutor = ShizukuInputExecutor(
+        client = shizukuClient,
+        bridgeProvider = { shizukuBridge },
         mapper = coordinateMapper,
-        retryMax = config.exec.retryMax,
+        screenSizeProvider = ::screenSize,
     )
     private val executors: List<Executor> = listOf(
         AccessibilityExecutor { VoiceAccessibilityService.instance },
-        adbExecutor,
+        shizukuExecutor,
         ReadOnlyExecutor,
     )
     val executorChain = ExecutorChain(executors)
+
+    /** 真实屏幕尺寸：Resources.getSystem() 会随横竖屏自然交换宽高 */
+    private fun screenSize(): Pair<Int, Int> {
+        val metrics = Resources.getSystem().displayMetrics
+        return metrics.widthPixels to metrics.heightPixels
+    }
 
     private val wakeUseCase = WakeUseCase(
         wakeProvider = { currentFactory.wakeDetector() },
@@ -106,10 +119,17 @@ class AppContainer(private val context: Context) {
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
 
     fun initialize() {
+        // 语音主链路优先启动，绝不放在 Shizuku 的 try 块内
         recognitionPipeline.start(scope)
         scope.launch {
             settingsStore.configFlow.collect { updateConfig(it) }
         }
+        scope.launch {
+            shizukuClient.status.collect { updateRuntimeMetrics() }
+        }
+        // Shizuku 是可选备用链路：任何异常只记事件，不允许拖垮 Application.onCreate
+        runCatching { shizukuClient.start() }
+            .onFailure { telemetry.event("shizuku", "start_failed") }
     }
 
     private fun updateConfig(next: AppConfig) {
@@ -117,7 +137,6 @@ class AppContainer(private val context: Context) {
         val needReload = previous.preferredDelegate != next.preferredDelegate ||
             previous.useDemoModels != next.useDemoModels
         config = next
-        adbClient = AdbClient(next.exec.adbBaseUrl)
         updateRuntimeMetrics()
         if (needReload) {
             inferenceFactory.unloadAll()
@@ -172,7 +191,7 @@ class AppContainer(private val context: Context) {
     private fun publishMetrics(snapshot: VoiceMetrics) {
         _metrics.value = snapshot.copy(
             modelVersion = modelVersion,
-            adbReachable = adbExecutor.adbReachable,
+            shizukuReady = shizukuClient.status.value.phase == ShizukuPhase.AUTHORIZED,
         )
     }
 
@@ -180,7 +199,7 @@ class AppContainer(private val context: Context) {
         _metrics.value = _metrics.value.copy(
             audioCapturing = audioCapture.isCapturing,
             modelVersion = modelVersion,
-            adbReachable = adbExecutor.adbReachable,
+            shizukuReady = shizukuClient.status.value.phase == ShizukuPhase.AUTHORIZED,
         )
     }
 
@@ -200,6 +219,8 @@ class AppContainer(private val context: Context) {
     )
 
     fun close() {
+        shizukuBridge.close()
+        shizukuClient.close()
         recognitionPipeline.stop()
         audioCapture.close()
         stateMachine.close()

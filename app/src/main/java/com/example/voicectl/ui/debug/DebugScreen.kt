@@ -93,8 +93,8 @@ fun DebugScreen(
                 )
                 Spacer(Modifier.width(Spacing.sm))
                 StatusBadge(
-                    text = if (metrics.adbReachable) "ADB：可达" else "ADB：不可达",
-                    tone = if (metrics.adbReachable) Tone.OK else Tone.NEUTRAL,
+                    text = if (metrics.shizukuReady) "Shizuku：已授权" else "Shizuku：未授权",
+                    tone = if (metrics.shizukuReady) Tone.OK else Tone.NEUTRAL,
                 )
             }
         }

@@ -33,16 +33,16 @@ class MappingViewModel : ViewModel() {
         overrides = overrides + (key to (x.coerceIn(0, 1080) to y.coerceIn(0, 2340)))
     }
 
-    /** 生成 ADB 命令示意文本；仅用于展示，App 内不执行 adb shell */
+    /** 生成强类型输入命令示意文本；端内不拼接、不执行 shell 命令。 */
     fun previewCode(): String {
         val sb = StringBuilder("# 指令: 换名刀  CMD_HUAN_MINGDAO\n# 基准 1080x2340，运行时按当前分辨率换算\n")
         CommandLibrary.commandActions.first().steps.forEach { step ->
             when (step) {
                 is ExecStep.Tap -> {
                     val (x, y) = coordinateOf(step.key)
-                    sb.append("adb shell input tap $x $y   # ${step.key}\n")
+                    sb.append("Tap(x=$x, y=$y)   # ${step.key}\n")
                 }
-                is ExecStep.Wait -> sb.append("sleep ${step.ms / 1000}   # 等待界面稳定\n")
+                is ExecStep.Wait -> sb.append("Wait(ms=${step.ms})   # 等待界面稳定\n")
                 is ExecStep.Verify -> sb.append("# verify ${step.key} -> FAIL: STOP, retry <= 1\n")
             }
         }

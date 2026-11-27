@@ -96,7 +96,7 @@ fun SettingsScreen(
                 QuietButton(text = "指令映射 / 坐标库", onClick = onMapping)
             }
             Row(modifier = Modifier.fillMaxWidth()) {
-                QuietButton(text = "ADB 连接", onClick = onAdb)
+                QuietButton(text = "Shizuku 无线调试", onClick = onAdb)
             }
         }
 

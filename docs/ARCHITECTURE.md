@@ -6,7 +6,7 @@
 
 ## 0. 需求拆解（先对齐再开工）
 
-**核心功能点**：①15 个页面/状态全实现；②可插拔推理层 + 内置 Demo 实现（真实 .tflite / owner.spk 后补，零改业务代码）；③GPU→NNAPI→CPU 自动降级 + 设置页手动切换 delegate；④C1 真退出（卸载模型、退出常驻拾音、仅手动恢复）；⑤执行层 A11y/ADB 双实现；⑥CI 构建 APK。
+**核心功能点**：①15 个页面/状态全实现；②可插拔推理层 + 内置 Demo 实现（真实 .tflite / owner.spk 后补，零改业务代码）；③GPU→NNAPI→CPU 自动降级 + 设置页手动切换 delegate；④C1 真退出（卸载模型、退出常驻拾音、仅手动恢复）；⑤执行层 A11y/Shizuku 双实现；⑥CI 构建 APK。
 
 **业务实体**：Wake/L1-L2、Command（ACTION×OBJECT 双头 14 类 + 拒识）、Control（C0–C4）、Speaker（192 维 embedding + 3 子质心模板）、CommandAction（tap/wait/verify 步骤序列）、Coordinate（基准 1080×2340）、AppConfig（§14 YAML 的运行时子集）。
 
@@ -59,7 +59,7 @@ AudioRecord(16k mono) → FrontEnd(AEC/NS/AGC/VAD) → FeatureExtractor(40 mel+C
         └─ C4 → LISTEN
   → CommandClassifier.classify(ACTION×OBJECT, τ.80) → SpeakerVerifier 复核(τ.65)
   → EVENT_COMMAND → EXECUTE → SideEffect(Execute) → ExecutorChain
-        → [AccessibilityExecutor 主 → AdbExecutor 备] → ExecResult
+        → [AccessibilityExecutor 主 → ShizukuInputExecutor 备] → ExecResult
   → EVENT_EXEC_DONE → COOLDOWN(1.5s) → IDLE
 ```
 `ERROR`：连续 3 次异常→关语音并提示；任一态游戏离前台→EXIT（回 IDLE 并停采集）。
@@ -125,12 +125,18 @@ aixiaohu/
 │       │   │   │   ├── EnrollSpeakerUseCase.kt
 │       │   │   │   └── ExecuteCommandUseCase.kt
 │       │   │   ├── exec/
-│       │   │   │   ├── Executor.kt           # 接口 + CommandAction/ExecResult
-│       │   │   │   ├── ExecutorChain.kt      # A11y→Adb→只读提示
+│       │   │   │   ├── Executor.kt           # 接口 + CommandAction/ExecResult(attempted)
+│       │   │   │   ├── ExecutorChain.kt      # A11y→Shizuku→只读提示；部分执行后禁止降级
 │       │   │   │   ├── AccessibilityExecutor.kt
-│       │   │   │   ├── AdbExecutor.kt        # HTTP→PC bridge.py（OkHttp）
-│       │   │   │   ├── AdbClient.kt          # pair/connect/heartbeat/tap/wm size
 │       │   │   │   └── CoordinateMapper.kt   # x=x0*W/1080, y=y0*H/2340
+│       │   │   ├── shizuku/                  # ★备用执行链路（shell 进程 UserService）
+│       │   │   │   ├── ShizukuStatus.kt      # 六态 + 环境快照 + 纯函数状态解析器
+│       │   │   │   ├── ShizukuClient.kt / ShizukuClientImpl.kt
+│       │   │   │   ├── InputCommand.kt / CommandValidator.kt
+│       │   │   │   ├── InputBridge.kt        # bindUserService + AIDL int 结果包装
+│       │   │   │   ├── ShizukuInputService.kt / ShizukuInputExecutor.kt
+│       │   │   │   ├── ActivationGuide.kt / WirelessDebugGuide.kt / InstallShizukuGuide.kt
+│       │   │   │   └── ShizukuDebugInfo.kt
 │       │   │   ├── service/
 │       │   │   │   ├── VoiceForegroundService.kt   # 常驻通知 + 状态入口
 │       │   │   │   ├── VoiceAccessibilityService.kt
@@ -150,7 +156,7 @@ aixiaohu/
 │       │   │   │   ├── settings/SettingsScreen.kt + SettingsViewModel.kt
 │       │   │   │   ├── voiceprint/VoiceprintScreen.kt + VoiceprintViewModel.kt
 │       │   │   │   ├── panel/PanelScreen.kt + PanelViewModel.kt
-│       │   │   │   ├── adb/AdbScreen.kt + AdbViewModel.kt
+│       │   │   │   ├── shizuku/ShizukuScreen.kt + ShizukuViewModel.kt
 │       │   │   │   ├── mapping/MappingScreen.kt + MappingViewModel.kt
 │       │   │   │   └── debug/DebugScreen.kt + DebugViewModel.kt
 │       │   │   ├── monitor/Telemetry.kt      # 分模式埋点（脱敏）
@@ -163,7 +169,8 @@ aixiaohu/
 │       │       └── owner.spk                 # 后补（加密模板）
 │       ├── test/java/.../                    # JUnit5 + MockK + Turbine（状态机/VM 单测）
 │       └── androidTest/java/.../             # Compose 测试 + 关键流程仪器化
-├── docs/                                    # 本方案 / 原型 / CSS / ADB 手册
+│       │   └── aidl/com/example/voicectl/shizuku/IShizukuInputService.aidl  # 无 String 命令槽位
+├── docs/                                    # 本方案 / 原型 / CSS / Shizuku 说明
 └── README.md
 ```
 **模型热切换机制**：`manifest.json` 声明模型是否齐全；`AppContainer` 启动时若检测 `*.tflite` 缺失或 manifest 标记 `demo=true` → 注入 `DemoInferenceFactory`；文件补齐后置 `demo=false` → 注入 `TfliteInferenceFactory`。**业务代码与 UI 零改动**。
@@ -181,8 +188,8 @@ aixiaohu/
 | 配置/存储 | Preferences DataStore（不用 Proto） | 只存开关/阈值/delegate 等标量；无代码生成 | Proto 强类型但需插件，自用不值 |
 | 推理 delegate | `DelegateChain`：AUTO/GPU→NNAPI→CPU，逐档 try 创建 Interpreter，失败降级 | 用户明确要 GPU 直调；GpuDelegate 在部分荣耀机不兼容必须兜底 | 固定 CPU 最稳但放弃 NPU/GPU 性能 |
 | 音频前端 | AudioRecord + AudioEffect(AEC/NS/AGC) + 能量 VAD | minSdk29 全覆盖，无需 AAudio 高版本特性 | AAudio 更低延迟但 API 门槛高 |
-| 执行（主/备） | AccessibilityService → ADB HTTP 客户端（OkHttp）→ 只读提示；注入/Hook 禁止 | 与方案 §13.6/§16 既定优先级一致 | 纯端内 adb 库不稳，留产品化再评估 |
-| 网络 | OkHttp 4.x（ADB 桥接客户端） | 轻量、协程友好、心跳/重连好写 | Ktor 更 Kotlin 但依赖更重 |
+| 执行（主/备） | AccessibilityService → Shizuku UserService（shell 进程强类型 AIDL）→ 只读提示；注入/Hook 禁止 | 与方案 §13.6/§16 既定优先级一致；无线调试只是 Shizuku 的启动方式，不是第二套客户端 | 字符串命令 AIDL 会打开任意命令槽位，已从类型层封死 |
+| 可选链路隔离 | Shizuku 启动/监听注册/状态重算全部 runCatching，失败只记 telemetry | 备用链路不能拖垮 `Application.onCreate` 与语音主链 | 不隔离会在 ShizukuProvider 异常时整机不可用 |
 | 测试 | JUnit5 + MockK + Turbine + Compose Testing；仪器化测真机 delegate | 状态机/VM 纯 JVM 可测，UI 用 semantic matcher | — |
 | 版本号 | AGP 8.5+ / Kotlin 2.0 / Compose BOM 2024.09 / TFLite 2.16（libs.versions.toml 统一管理） | 需 JDK17 编译链；**版本以 CI 实际解析为准，CI 报错即调 toml** | 本机 JDK8 无法本地编译，CI 是唯一验证路径 |
 
@@ -341,13 +348,18 @@ sealed class ExecStep {
     data class Wait(val ms: Long) : ExecStep()
     data class Verify(val key: String) : ExecStep()   // 失败即停，retry ≤1
 }
-data class ExecResult(val success: Boolean, val message: String = "")
+data class ExecResult(
+    val success: Boolean, val message: String = "", val attempted: Boolean = false,
+)
 
 class AccessibilityExecutor(...) : Executor
-class AdbExecutor(client: AdbClient, mapper: CoordinateMapper) : Executor
-class ExecutorChain(private val executors: List<Executor>) : Executor   // A11y → Adb → 只读提示
+class ShizukuInputExecutor(
+    client: ShizukuClient, bridgeProvider: () -> InputBridge?,
+    mapper: CoordinateMapper, screenSizeProvider: () -> Pair<Int, Int>,
+) : Executor
+class ExecutorChain(private val executors: List<Executor>) : Executor   // A11y → Shizuku → 只读提示
 ```
-`AdbClient`：`suspend fun pair(ip, pairPort, code)` / `connect(ip, connPort)` / `heartbeat(): Boolean` / `wmSize(): Size` / `tap(x,y)`；失败按 §14 `heartbeat_s=5, reconnect_max=3, retry_max=1`。
+`InputBridge`：`suspend fun execute(command: InputCommand): CommandResult` / `suspend fun probe(): CommandResult`；内部 `Shizuku.bindUserService()` 绑定 shell 进程服务，强类型 AIDL 只传 int，无字符串命令槽位。`attempted=true` 的失败禁止降级重放，避免重复点击。
 
 ### 4.4 配置与词表（对应 §14 YAML / §1 标签）
 
@@ -357,6 +369,7 @@ data class AppConfig(
     val controlWords: ControlWordConfig, val voiceWakeup: WakeupConfig,
     val exec: ExecConfig, val speaker: SpeakerConfig,
     val preferredDelegate: Delegate, val useDemoModels: Boolean,
+    val everShizukuAuthorized: Boolean = false,  // 冷启动识别 AUTHORIZATION_LOST
 )
 data class DecodeConfig(
     val tauCoarse: Float = .60f, val tauFine: Float = .90f, val debounceFrames: Int = 3,
@@ -380,7 +393,7 @@ data class SpeakerConfig(
     val fallbackToNonspk: Boolean = true,
 )
 data class ExecConfig(
-    val primary: ExecKind = ExecKind.ACCESSIBILITY, val fallback: ExecKind = ExecKind.ADB,
+    val primary: ExecKind = ExecKind.ACCESSIBILITY, val fallback: ExecKind = ExecKind.SHIZUKU,
     val coordBase: Size = Size(1080, 2340), val heartbeatS: Int = 5, val retryMax: Int = 1,
 )
 object LabelBook {
@@ -408,14 +421,14 @@ object LabelBook {
 | 7 | home/paused | 同上 | chip=PAUSED「识别已暂停」+30s 倒计时、恢复按钮 | → listening（超时/C4/手动） |
 | 8 | home/silent | 同上 | chip=SILENT「语音已退出」+「点悬浮球恢复」，徽标=无语音 | **仅**手动入口 → listening |
 | 9 | home/recogoff | 同上 | chip=RECOG OFF「识别已关闭」唤醒仍在 | → window（唤醒后说 C4） |
-| 10 | settings | `SettingsScreen` | 唤醒开关、voice/manual/silent 分段、灵敏度、反馈、退出二次确认、delegate 选择、声纹开关、三入口 | → voiceprint / mapping / adb / debug |
+| 10 | settings | `SettingsScreen` | 唤醒开关、voice/manual/silent 分段、灵敏度、反馈、退出二次确认、delegate 选择、声纹开关、三入口 | → voiceprint / mapping / shizuku(adb 路由名) / debug |
 | 11 | voiceprint | `VoiceprintScreen` | 642/600 进度、三环境子质心、接受率/冒认率、删除确认、临时放行 | → settings；删除弹窗 |
 | 12 | panel | `PanelScreen` | 7 装备+6 号位+切换位置（14 项）、悬浮球交互说明 | 直选 → home/executing；→ home / settings / debug |
-| 13 | adb | `AdbScreen` | 未连接/配对中/已连接、IP/配对端口/连接端口/配对码、命令示意、坐标表、安全红线 | → mapping |
-| 14 | mapping | `MappingScreen` | 3 tab：坐标库(公共6+槽位6+装备7)/指令编排/执行预览；基准 1080×2340 | → adb（返回） |
+| 13 | adb（路由名保留） | `ShizukuScreen` | 六态（未安装/未运行/未授权/已授权/授权失效/不支持）+ 激活步骤 + 真机环境快照 + dev 自测区 | → settings |
+| 14 | mapping | `MappingScreen` | 3 tab：坐标库(公共6+槽位6+装备7)/指令编排/执行预览；基准 1080×2340 | → settings（返回） |
 | 15 | debug | `DebugScreen` | 波形/频谱、L1/L2/cmd/ctrl/spk 置信度、坐标拾取、事件日志；**仅 dev flavor** | → home / settings |
 
-**导航图（route）**：`onboarding → permissions → home/{state}`；`home → settings → {voiceprint, mapping → adb, adb, debug}`；`home ⇄ panel`；`home → debug(dev)`。全局浮层：`ExitConfirmDialog`（C1）、`DeleteSpkDialog`、`NotificationShade`（前台服务通知）、`VoiceFab`（悬浮球，贯穿所有页面，C1 后唯一恢复入口）。`gray/release` flavor 隐藏 debug destination 与入口。
+**导航图（route）**：`onboarding → permissions → home/{state}`；`home → settings → {voiceprint, mapping, adb(ShizukuScreen), debug}`；`home ⇄ panel`；`home → debug(dev)`。全局浮层：`ExitConfirmDialog`（C1）、`DeleteSpkDialog`、`NotificationShade`（前台服务通知）、`VoiceFab`（悬浮球，贯穿所有页面，C1 后唯一恢复入口）。`gray/release` flavor 隐藏 debug destination 与入口。
 
 ---
 
@@ -507,14 +520,14 @@ jobs:
 6. **导航与全局壳**：`MainActivity` + `AppNavHost`（8 destination + home/{state}）+ `AppViewModel`（持状态机、订阅 SideEffect）+ 全局浮层（C1 确认/删除声纹/通知 shade/悬浮球）。
 7. **主页 7 态 UI**：`HomeScreen` + `StateCard` + 状态卡动画 + 门控 4 项 + 最近指令列表 + 快捷按钮；与状态机 StateFlow 打通（原型的 `playFlow` 流程可做成 debug 页的演示按钮）。
 8. **引导 + 权限页**：`OnboardingScreen`/`PermissionsScreen`，权限按需申请、拒绝降级到 manual/silent。
-9. **设置页**：`SettingsScreen`（唤醒开关/模式分段/灵敏度/反馈/退出二次确认/**delegate 手动切换**/声纹入口/ADB/映射/调试入口/版本号）；delegate 切换写 DataStore 并重载引擎、显示实际生效 delegate。
+9. **设置页**：`SettingsScreen`（唤醒开关/模式分段/灵敏度/反馈/退出二次确认/**delegate 手动切换**/声纹入口/Shizuku/映射/调试入口/版本号）；delegate 切换写 DataStore 并重载引擎、显示实际生效 delegate。
 10. **声纹页**：`VoiceprintScreen` 注册进度/三环境子质心/自测指标/删除确认/临时放行；Demo 实现走本地模拟，TFLite 实现接 `SpeakerVerifier`。
 11. **手动面板页**：`PanelScreen` 14 项 cmd-grid（7 装备+6 号位+切换位置）+ 悬浮球交互说明；点击走 `ExecutorChain` → home/executing。
-12. **ADB 页 + 执行层**：`AdbScreen` + `AdbClient`/`AdbExecutor`/`CoordinateMapper`/`AccessibilityExecutor`/`ExecutorChain`；原型 COORDS 表落到 `docs` 常量，真实坐标需真机实测。
+12. **Shizuku 页 + 执行层**：`ShizukuScreen` + `ShizukuClient`/`InputBridge`/`ShizukuInputService`/`ShizukuInputExecutor`/`CoordinateMapper`/`AccessibilityExecutor`/`ExecutorChain`；API 34+ 走无线调试引导、29–33 走安装引导；六态与真机环境快照全部来自真实探测。原型 COORDS 表落到 `docs` 常量，真实坐标需真机实测。
 13. **指令映射页**：`MappingScreen` 三 tab（坐标库/指令编排/执行预览）；COORDS(6+6+7) 与 CMD_LIST 步骤序列落数据模型，支持编辑与基准换算。
 14. **调试页（dev flavor）**：`DebugScreen` 波形/置信度条/坐标拾取/事件日志；sourceSet 隔离 `src/dev` 提供入口，`gray/release` 不编译该页。
 15. **TFLite 实现骨架**：`tflite/*` 五文件 + `TfliteEngine` 的 delegate 降级链 + 从 `assets/models/manifest.json` 读张量规格；模型缺失时 `load()` 返回明确错误，`AppContainer` 自动回落 Demo。**注意：不写真实推理算法，只写加载/映射/降级框架**；待用户提供 .tflite/owner.spk 后填 assets 即切换。
-16. **端到端联调**：C1 真退出逐条验证（卸载后 Debug 页应看不到推理活动、麦克风释放）；C2/C3/C4、声纹拒绝/降级、delegate 降级、ADB 断连重连；埋点 `Telemetry` 分模式维度。
+16. **端到端联调**：C1 真退出逐条验证（卸载后 Debug 页应看不到推理活动、麦克风释放）；C2/C3/C4、声纹拒绝/降级、delegate 降级、Shizuku 授权撤销与 binder 断开重连；埋点 `Telemetry` 分模式维度。
 17. **测试与交付**：补 JVM 单测 + Compose 测试；最终 push 产 artifact，附 README（构建命令/安装/模型替换说明/自用免责声明）。
 
 ---
@@ -523,10 +536,10 @@ jobs:
 
 1. 真实模型文件名、输入输出张量名/形状/dtype → 填 `manifest.json`（用户提供后仅需改 assets，不动代码）。
 2. `owner.spk` 加密格式（建议：自定义头 + AES，密钥不入仓；与 TfliteSpeakerVerifier 约定）。
-3. PC 端 `bridge.py` 部署 IP/端口与鉴权方式 → 决定 `AdbClient` baseUrl（自用可先用局域网明文 + token）。
+3. Shizuku App 安装渠道与目标机 `/system/bin/input` 路径确认 → 决定自测区 probe 结果（缺路径时真实退出码非 0，不做假数值）。
 4. 包名最终确认：本文暂用 `com.aixiaohu.voicectl`。
 5. delegate 版本兼容：GpuDelegate 在部分荣耀机型的 NNAPI 差异只能靠真机/CI 验证；若 CI 无真机，delegate 实际降级表现需用户在真机调试页确认。
 
 ---
 
-**给 android-coder 的三条红线提醒**：①每一步以 CI artifact 编译通过为准，别在本机 JDK8 上折腾构建；②禁写任何注入/Hook/读内存代码，执行只走 A11y/ADB/只读提示；③C1 必须是真卸载 + StopCapture，且 `MANUAL_SILENT` 只认手动事件，禁止"隐藏 UI 后台仍听"的假退出。
+**给 android-coder 的三条红线提醒**：①每一步以 CI artifact 编译通过为准，别在本机 JDK8 上折腾构建；②禁写任何注入/Hook/读内存代码，执行只走 A11y/Shizuku（强类型 AIDL → /system/bin/input）/只读提示；③C1 必须是真卸载 + StopCapture，且 `MANUAL_SILENT` 只认手动事件，禁止"隐藏 UI 后台仍听"的假退出。

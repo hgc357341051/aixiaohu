@@ -49,6 +49,7 @@ android {
     buildFeatures {
         compose = true
         buildConfig = true
+        aidl = true
     }
 
     compileOptions {
@@ -81,9 +82,10 @@ dependencies {
     implementation(libs.androidx.navigation.compose)
     implementation(libs.androidx.datastore.preferences)
     implementation(libs.kotlinx.coroutines.android)
-    implementation(libs.okhttp)
     implementation(libs.tensorflow.lite)
     implementation(libs.tensorflow.lite.gpu)
+    implementation(libs.shizuku.api)
+    implementation(libs.shizuku.provider)
 
     testImplementation(libs.junit)
     testImplementation(libs.kotlinx.coroutines.test)
