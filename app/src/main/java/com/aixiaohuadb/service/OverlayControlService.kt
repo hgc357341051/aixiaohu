@@ -120,6 +120,11 @@ class OverlayControlService : Service() {
                 if (modeChanged && panelOpen) buildPanel()
             }
         }
+        // 窗口切换即使不改变"是否游戏"，也要重算悬浮层可见性：
+        // 否则从游戏切回自家 App 时按钮会留在编辑器上。
+        serviceScope?.launch {
+            ForegroundGameMonitor.foregroundPackage.collect { reconcile() }
+        }
         // 前台兜底轮询：无障碍事件直达为主通道，500ms 轮询保证无障碍未开启时也能切换
         serviceScope?.launch {
             while (isActive) {

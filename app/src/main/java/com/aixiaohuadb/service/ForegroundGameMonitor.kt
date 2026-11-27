@@ -32,9 +32,14 @@ object ForegroundGameMonitor {
     private val _gameForeground = MutableStateFlow(false)
     val gameForeground: StateFlow<Boolean> = _gameForeground.asStateFlow()
 
+    /** 每次窗口切换都发一个值（包括切回自家 App），悬浮层据此立即隐藏/恢复， */
+    private val _foregroundPackage = MutableStateFlow<String?>(null)
+    val foregroundPackage: StateFlow<String?> = _foregroundPackage.asStateFlow()
+
     /** 无障碍事件直达：更新跟踪包名并发布前台状态 */
     fun notifyForegroundPackage(pkg: String?) {
         lastForegroundPackage = pkg
+        _foregroundPackage.value = pkg
         if (pkg != null) publish(pkg in TARGET_PACKAGES)
     }
 
