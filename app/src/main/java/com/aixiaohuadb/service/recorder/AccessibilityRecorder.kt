@@ -27,6 +27,7 @@ import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
+import kotlinx.coroutines.withTimeoutOrNull
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
@@ -253,7 +254,11 @@ class AccessibilityRecorder(
             forwardMutex.withLock {
                 setTouchable(false)
                 try {
-                    service.multiGesture(pointers, duration)
+                    // 必须给回调兜底：dispatchGesture 被接受但系统不回调时，
+                    // 录制层会永久停在 NOT_TOUCHABLE，表现为"录制中但完全点不动"。
+                    withTimeoutOrNull(duration.toLong() + TOUCH_RESTORE_SLACK_MS) {
+                        service.multiGesture(pointers, duration)
+                    }
                 } finally {
                     setTouchable(true)
                 }
@@ -347,6 +352,7 @@ class AccessibilityRecorder(
 
     private companion object {
         const val LONG_PRESS_MS = 450
+        const val TOUCH_RESTORE_SLACK_MS = 1_500L
     }
 
     // ---------------- 触摸采集 ----------------
