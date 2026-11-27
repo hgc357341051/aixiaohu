@@ -90,7 +90,7 @@ class AdbClient(
     /** 无线调试配对：pairingCode 由用户从系统开发者选项读取后输入。 */
     suspend fun pair(host: String, port: Int, pairingCode: String): Result<Unit> =
         withContext(Dispatchers.IO) {
-            runCatching {
+            val outcome = runCatching {
                 require(host.isNotBlank() && port in 1..65535) { "配对地址或端口无效" }
                 require(pairingCode.length == 6 && pairingCode.all { it.isDigit() }) { "配对码需为 6 位数字" }
                 Kadb.pair(host = host.trim(), port = port, pairingCode = pairingCode.trim())
@@ -99,9 +99,16 @@ class AdbClient(
                     phase = AdbPhase.PAIRED,
                     reason = "配对成功，请在无线调试主页查看连接端口（与配对端口不同）",
                 )
-            }.onFailure { t ->
-                publish(AdbPhase.ERROR, AdbErrors.pairing(t))
             }
+            outcome.onFailure { t ->
+                val friendly = AdbErrors.pairing(t)
+                publish(AdbPhase.ERROR, friendly)
+            }
+            // Result 也返回友好消息，UI 的 message 卡片不再显示 BoringSSL 原文
+            outcome.fold(
+                onSuccess = { Result.success(Unit) },
+                onFailure = { t -> Result.failure(IllegalStateException(AdbErrors.pairing(t), t)) },
+            )
         }
 
     /**
@@ -110,7 +117,7 @@ class AdbClient(
      */
     suspend fun connect(host: String, port: Int): Result<Unit> = withContext(Dispatchers.IO) {
         val host = host.trim()
-        runCatching {
+        val outcome = runCatching {
             require(host.isNotBlank() && port in 1..65535) { "连接地址或端口无效" }
             ioMutex.withLock {
                 clearConnectionLocked()
@@ -123,10 +130,15 @@ class AdbClient(
                 connectedEndpoint = AdbEndpoint(host, port)
             }
             publish(AdbPhase.CONNECTED, "已连接，shell 可用", host, port)
-        }.onFailure { t ->
+        }
+        outcome.onFailure { t ->
             ioMutex.withLock { clearConnectionLocked() }
             publish(AdbPhase.ERROR, AdbErrors.connection(t, host, port))
         }
+        outcome.fold(
+            onSuccess = { Result.success(Unit) },
+            onFailure = { t -> Result.failure(IllegalStateException(AdbErrors.connection(t, host, port), t)) },
+        )
     }
 
     /** 断开并释放连接。Kadb.close() 线程安全，无需等待 ioMutex。 */
