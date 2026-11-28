@@ -38,6 +38,7 @@ import com.aixiaohuadb.machine.VoiceStateMachine
 import com.aixiaohuadb.macro.MacroBindingStore
 import com.aixiaohuadb.monitor.Telemetry
 import com.aixiaohuadb.service.ControlMode
+import com.aixiaohuadb.service.ForegroundGameMonitor
 import com.aixiaohuadb.service.MacroResolver
 import com.aixiaohuadb.service.OverlayStore
 import com.aixiaohuadb.service.VoiceAccessibilityService
@@ -201,6 +202,12 @@ class AppContainer(private val context: Context) {
         scope.launch {
             settingsStore.configFlow.collect { updateConfig(it) }
         }
+        // 恢复用户登记的游戏包名（渠道服/其它游戏），供前台识别兜底
+        scope.launch {
+            settingsStore.extraGamePackagesFlow.collect { pkgs ->
+                ForegroundGameMonitor.replaceRegisteredPackages(pkgs)
+            }
+        }
         scope.launch {
             adbClient.status.collect { updateRuntimeMetrics() }
         }
@@ -300,11 +307,18 @@ class AppContainer(private val context: Context) {
     /**
      * 面板/手动按钮直接回放用户宏；与语音状态无关。
      * 每次调用新建 [ManualExecutionToken] 与独立执行链，语音 disable 的取消令牌不参与。
+     *
+     * [extraGuard] 供悬浮按钮回放注入"游戏切后台即中断"等场景守卫；
+     * 与令牌取消信号取或，任一触发即在下一步派发前停止。默认空守卫保持面板/调试调用行为不变。
      */
-    suspend fun executeManual(action: CommandAction): ExecResult {
+    suspend fun executeManual(
+        action: CommandAction,
+        extraGuard: ExecutionGuard = ExecutionGuard.NONE,
+    ): ExecResult {
         if (action.steps.isEmpty()) return ExecResult(false, "宏为空")
         val token = ManualExecutionToken()
-        val manualChain = buildExecutorChain(token.guard)
+        val combinedGuard = ExecutionGuard { token.guard.isCancelled() || extraGuard.isCancelled() }
+        val manualChain = buildExecutorChain(combinedGuard)
         val budget = executionBudgetMs(action.steps)
         return withContext(Dispatchers.IO) {
             try {
@@ -312,7 +326,7 @@ class AppContainer(private val context: Context) {
             } catch (e: TimeoutCancellationException) {
                 ExecResult(false, "执行超时")
             } catch (e: CancellationException) {
-                ExecResult(false, "手动回放已取消")
+                ExecResult(false, if (extraGuard.isCancelled()) "游戏已切后台，回放已中断" else "手动回放已取消")
             } catch (e: Exception) {
                 ExecResult(false, "执行异常：${e.message ?: "未知错误"}")
             }

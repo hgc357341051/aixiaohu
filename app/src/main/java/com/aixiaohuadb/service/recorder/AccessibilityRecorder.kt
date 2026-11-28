@@ -67,7 +67,13 @@ class AccessibilityRecorder(
 
     private var overlay: RecorderView? = null
     private var chip: View? = null
+    private var chipParams: WindowManager.LayoutParams? = null
     private var overlayParams: WindowManager.LayoutParams? = null
+    /** 胶囊是否已折叠成小圆点 */
+    private var chipFolded = false
+    /** 胶囊贴边：记录逻辑 y，避免拖拽后 updateChip 丢失位置 */
+    private var chipX = 0
+    private var chipY = 0
 
     private val steps = mutableListOf<MacroStep>()
     private var startedAtMs = 0L
@@ -119,7 +125,10 @@ class AccessibilityRecorder(
         overlay = view
         overlayParams = params
         steps.clear()
-        startedAtMs = SystemClock.elapsedRealtime()
+        // 统一时间基准：MotionEvent.eventTime 基于 uptimeMillis（不含深度睡眠）。
+        // 过去用 elapsedRealtime 计算窗口，手机睡过觉后 acceptInputFromMs 远大于 eventTime，
+        // 导致每一次手势都被早退、既不记录也不转发 —— "录制时点游戏没反应"的根因。
+        startedAtMs = SystemClock.uptimeMillis()
         acceptInputFromMs = startedAtMs + 350L
         paused = false
         lastUpAtMs = startedAtMs
@@ -127,7 +136,7 @@ class AccessibilityRecorder(
         showChip()
         ticker = scope.launch {
             while (running) {
-                val elapsed = SystemClock.elapsedRealtime() - startedAtMs
+                val elapsed = SystemClock.uptimeMillis() - startedAtMs
                 updateChip(elapsed, steps.size)
                 listener.onTick(elapsed, steps.size)
                 delay(500L)
@@ -163,18 +172,23 @@ class AccessibilityRecorder(
 
     private fun handleGesture(gesture: RecordedGesture) {
         if (!running || paused) return
-        if (gesture.downAtMs < acceptInputFromMs) return
-        // 每次手势都重新取当前显示尺寸：录制中切横屏/竖屏时，
-        // 用启动时的旧尺寸归一化会把坐标算到屏幕外。
-        val (width, height) = DisplaySize.current(context)
-        val safeWidth = width.coerceAtLeast(1)
-        val safeHeight = height.coerceAtLeast(1)
-        // 多指只保留主指写进文档（P0 限制），但转发时按原样派发，游戏看到的是真实手势。
-        val step = buildStep(gesture, safeWidth, safeHeight)
-        if (step != null) {
-            steps += step
-            listener.onStep(step)
-            listener.onTick(SystemClock.elapsedRealtime() - startedAtMs, steps.size)
+
+        // 启动后 350ms 的窗口只用于"不把点新建宏本身录成一步"，
+        // 但手势必须照常转发给游戏 —— 否则这段时间的点击被吞、游戏没反应。
+        val withinWarmup = gesture.downAtMs < acceptInputFromMs
+        if (!withinWarmup) {
+            // 每次手势都重新取当前显示尺寸：录制中切横屏/竖屏时，
+            // 用启动时的旧尺寸归一化会把坐标算到屏幕外。
+            val (width, height) = DisplaySize.current(context)
+            val safeWidth = width.coerceAtLeast(1)
+            val safeHeight = height.coerceAtLeast(1)
+            // 多指只保留主指写进文档（P0 限制），但转发时按原样派发，游戏看到的是真实手势。
+            val step = buildStep(gesture, safeWidth, safeHeight)
+            if (step != null) {
+                steps += step
+                listener.onStep(step)
+                listener.onTick(SystemClock.uptimeMillis() - startedAtMs, steps.size)
+            }
         }
         lastUpAtMs = gesture.upAtMs
         forward(gesture)
@@ -256,12 +270,18 @@ class AccessibilityRecorder(
 
         scope.launch {
             forwardMutex.withLock {
+                // 注入期间暂停/恢复也要串行：togglePause 若在锁外改 NOT_TOUCHABLE，
+                // 飞行中的注入手势会被重新可触摸的录制层吃回自己身上。
                 setTouchable(false)
                 try {
                     // 必须给回调兜底：dispatchGesture 被接受但系统不回调时，
                     // 录制层会永久停在 NOT_TOUCHABLE，表现为"录制中但完全点不动"。
-                    withTimeoutOrNull(duration.toLong() + TOUCH_RESTORE_SLACK_MS) {
+                    val dispatched = withTimeoutOrNull(duration.toLong() + TOUCH_RESTORE_SLACK_MS) {
                         service.multiGesture(pointers, duration)
+                    }
+                    if (dispatched == false) {
+                        // 调度被拒：明确提示，不再静默丢弃
+                        Log.w("AccessibilityRecorder", "multiGesture rejected")
                     }
                 } finally {
                     // 暂停期间不能恢复成可触摸，否则透传会被打断
@@ -282,89 +302,212 @@ class AccessibilityRecorder(
         runCatching { windowManager.updateViewLayout(view, params) }
     }
 
+    /**
+     * 录制胶囊：贴右边缘 + 可拖拽吸附 + 可折叠 + 半透明。
+     * 默认贴边而非顶部中央，避免压住游戏小地图/状态区；按钮间距 >=8dp 防误触。
+     */
     private fun showChip() {
         if (chip != null) return
-
-        fun chipButton(label: String, primary: Boolean, onClick: () -> Unit) = TextView(context).apply {
-            text = label
-            textSize = 11f
-            setTextColor(Color.WHITE)
-            gravity = Gravity.CENTER
-            minWidth = dp(52f)
-            minHeight = dp(36f)
-            setPadding(dp(10f), 0, dp(10f), 0)
-            background = GradientDrawable().apply {
-                cornerRadius = dp(12f).toFloat()
-                setColor(if (primary) 0xFF0E7490.toInt() else 0xFF16202E.toInt())
-                setStroke(dp(1f), if (primary) 0xFF2DD4BF.toInt() else 0xFF334155.toInt())
-            }
-            setOnClickListener { onClick() }
-        }
-
-        val root = LinearLayout(context).apply {
-            orientation = LinearLayout.HORIZONTAL
-            gravity = Gravity.CENTER_VERTICAL
-            // 整个胶囊可点：点空白处不该穿透到游戏，否则看起来像"点了没反应"
-            isClickable = true
-            background = GradientDrawable().apply {
-                cornerRadius = dp(20f).toFloat()
-                setColor(0xFF0B1220.toInt())
-                setStroke(dp(1f), 0xFFEF4444.toInt())
-            }
-            setPadding(dp(10f), dp(5f), dp(6f), dp(5f))
-        }
-
-        root.addView(TextView(context).apply {
-            // 文案必须短：长文案会把「完成 / 取消」挤出屏幕，触摸区域跟着丢
-            text = "● 00:00 · 0 步"
-            setTextColor(Color.WHITE)
-            textSize = 11f
-            maxLines = 1
-            tag = "record_label"
-            setPadding(0, 0, dp(8f), 0)
-        })
-        root.addView(chipButton("暂停", primary = false) { togglePause() }.apply {
-            tag = "record_pause"
-            layoutParams = LinearLayout.LayoutParams(
-                ViewGroup.LayoutParams.WRAP_CONTENT,
-                dp(36f),
-            ).apply { rightMargin = dp(4f) }
-        })
-        root.addView(chipButton("完成", primary = true) { listener.onFinishRequested() }.apply {
-            layoutParams = LinearLayout.LayoutParams(
-                ViewGroup.LayoutParams.WRAP_CONTENT,
-                dp(36f),
-            ).apply { rightMargin = dp(2f) }
-        })
-        root.addView(TextView(context).apply {
-            text = "×"
-            setTextColor(0xFFEF4444.toInt())
-            textSize = 16f
-            gravity = Gravity.CENTER
-            minWidth = dp(32f)
-            minHeight = dp(36f)
-            setOnClickListener { listener.onCancelRequested() }
-        })
+        val expanded = buildExpandedChipView()
 
         val params = WindowManager.LayoutParams(
             WindowManager.LayoutParams.WRAP_CONTENT,
             WindowManager.LayoutParams.WRAP_CONTENT,
             WindowManager.LayoutParams.TYPE_ACCESSIBILITY_OVERLAY,
             WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE
-                or WindowManager.LayoutParams.FLAG_LAYOUT_IN_SCREEN,
+                or WindowManager.LayoutParams.FLAG_LAYOUT_IN_SCREEN
+                // 关键：区域外触摸透传给游戏，胶囊不该吞掉边界外的技能点击
+                or WindowManager.LayoutParams.FLAG_NOT_TOUCH_MODAL,
             PixelFormat.TRANSLUCENT,
         ).apply {
-            gravity = Gravity.TOP or Gravity.CENTER_HORIZONTAL
-            // 72dp 而不是 28dp：28dp 会压到状态栏/刘海，触摸被 SystemUI 接走
-            y = dp(72f)
+            gravity = Gravity.TOP or Gravity.START
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
                 layoutInDisplayCutoutMode =
                     WindowManager.LayoutParams.LAYOUT_IN_DISPLAY_CUTOUT_MODE_SHORT_EDGES
             }
         }
-        val chipResult = runCatching { windowManager.addView(root, params) }
-        Log.d("AccessibilityRecorder", "chip addView ok=${chipResult.isSuccess} err=${chipResult.exceptionOrNull()?.message}")
-        chip = root
+        // 默认贴右边缘、避开顶部状态栏与底部技能区
+        val (screenW, _) = DisplaySize.current(context)
+        expanded.measure(View.MeasureSpec.UNSPECIFIED, View.MeasureSpec.UNSPECIFIED)
+        chipX = (screenW - expanded.measuredWidth - dp(8f)).coerceAtLeast(0)
+        chipY = dp(96f)
+        params.x = chipX
+        params.y = chipY
+        params.width = WindowManager.LayoutParams.WRAP_CONTENT
+        params.height = WindowManager.LayoutParams.WRAP_CONTENT
+        bindChipDrag(expanded, params)
+        val result = runCatching { windowManager.addView(expanded, params) }
+        if (result.isSuccess) {
+            chip = expanded
+            chipParams = params
+            applyChipAlpha()
+        } else {
+            Log.w("AccessibilityRecorder", "chip addView failed: ${result.exceptionOrNull()?.message}")
+        }
+    }
+
+    /** 半透明：游戏中弱化遮挡，手指按住时提亮 */
+    private fun applyChipAlpha(dim: Boolean = true) {
+        chip?.alpha = if (dim) 0.78f else 1f
+    }
+
+    /** 折叠 / 展开胶囊，折叠态只留一个小球。remove + add 才能真正替换 View。 */
+    private fun toggleChipFold() {
+        val old = chip ?: return
+        val params = chipParams ?: return
+        // updateViewLayout 无法替换 View，必须先 remove 再 add
+        runCatching { windowManager.removeView(old) }
+        chipFolded = !chipFolded
+        val next = if (chipFolded) buildFoldedChip() else buildExpandedChipView()
+        // 折叠态宽度变小，重新贴边吸附，避免展开后超出屏幕
+        next.measure(View.MeasureSpec.UNSPECIFIED, View.MeasureSpec.UNSPECIFIED)
+        val (screenW, _) = DisplaySize.current(context)
+        chipX = chipX.coerceIn(0, (screenW - next.measuredWidth - dp(8f)).coerceAtLeast(0))
+        params.x = chipX
+        params.y = chipY
+        bindChipDrag(next, params)
+        val add = runCatching { windowManager.addView(next, params) }
+        if (add.isSuccess) {
+            chip = next
+            chipParams = params
+            applyChipAlpha()
+        } else {
+            // 新 View 挂载失败：把旧的加回去，避免胶囊凭空消失
+            chipFolded = !chipFolded
+            chip = old
+            runCatching { windowManager.addView(old, params) }
+            Log.w("AccessibilityRecorder", "fold restore failed: ${add.exceptionOrNull()?.message}")
+        }
+    }
+
+    private fun buildFoldedChip(): View = TextView(context).apply {
+        text = "●"
+        setTextColor(0xFFEF4444.toInt())
+        textSize = 18f
+        gravity = Gravity.CENTER
+        minWidth = dp(44f)
+        minHeight = dp(44f)
+        isClickable = true
+        tag = "record_folded"
+        background = GradientDrawable().apply {
+            shape = GradientDrawable.OVAL
+            setColor(0xFF0B1220.toInt())
+            setStroke(dp(1f), 0xFFEF4444.toInt())
+        }
+        setOnClickListener { toggleChipFold() }
+    }
+
+    /** 展开态胶囊：计时 + 暂停 + 完成 + 收起 + 取消。showChip 与折叠切换共用。 */
+    private fun buildExpandedChipView(): View {
+        fun chipButton(label: String, primary: Boolean, onClick: () -> Unit) = TextView(context).apply {
+            text = label
+            textSize = 11f
+            setTextColor(Color.WHITE)
+            gravity = Gravity.CENTER
+            minWidth = dp(52f)
+            minHeight = dp(40f)
+            setPadding(dp(10f), 0, dp(10f), 0)
+            background = GradientDrawable().apply {
+                cornerRadius = dp(12f).toFloat()
+                setColor(if (primary) 0xFF17C9A3.toInt() else 0xFF16202E.toInt())
+                setStroke(dp(1f), if (primary) 0xFF3DF5C8.toInt() else 0xFF334155.toInt())
+            }
+            setOnClickListener { onClick() }
+        }
+
+        return LinearLayout(context).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER_VERTICAL
+            isClickable = true
+            background = GradientDrawable().apply {
+                cornerRadius = dp(20f).toFloat()
+                setColor(0xFF0B1220.toInt())
+                setStroke(dp(1f), 0xFFEF4444.toInt())
+            }
+            setPadding(dp(10f), dp(5f), dp(10f), dp(5f))
+
+            addView(TextView(context).apply {
+                text = "● 00:00 · 0 步"
+                setTextColor(Color.WHITE)
+                textSize = 11f
+                maxLines = 1
+                tag = "record_label"
+                setPadding(0, 0, dp(8f), 0)
+            })
+            addView(chipButton("暂停", primary = false) { togglePause() }.apply {
+                tag = "record_pause"
+                layoutParams = LinearLayout.LayoutParams(
+                    ViewGroup.LayoutParams.WRAP_CONTENT, dp(40f),
+                ).apply { rightMargin = dp(8f) }
+            })
+            addView(chipButton("完成", primary = true) { listener.onFinishRequested() }.apply {
+                layoutParams = LinearLayout.LayoutParams(
+                    ViewGroup.LayoutParams.WRAP_CONTENT, dp(40f),
+                ).apply { rightMargin = dp(8f) }
+            })
+            addView(chipButton("收起", primary = false) { toggleChipFold() }.apply {
+                tag = "record_fold"
+            })
+            addView(TextView(context).apply {
+                text = "×"
+                setTextColor(0xFFEF4444.toInt())
+                textSize = 16f
+                gravity = Gravity.CENTER
+                minWidth = dp(40f)
+                minHeight = dp(40f)
+                setOnClickListener { listener.onCancelRequested() }
+            })
+        }
+    }
+
+    /** 胶囊拖拽 + 松手贴边吸附 */
+    private fun bindChipDrag(view: View, params: WindowManager.LayoutParams) {
+        var downX = 0f
+        var downY = 0f
+        var startX = 0
+        var startY = 0
+        var dragging = false
+        val slop = dp(6f)
+        view.setOnTouchListener { v, event ->
+            when (event.actionMasked) {
+                MotionEvent.ACTION_DOWN -> {
+                    downX = event.rawX; downY = event.rawY
+                    startX = params.x; startY = params.y
+                    dragging = false
+                    applyChipAlpha(false)
+                    false // 让子按钮仍可点击
+                }
+                MotionEvent.ACTION_MOVE -> {
+                    val dx = event.rawX - downX
+                    val dy = event.rawY - downY
+                    if (!dragging && (kotlin.math.abs(dx) > slop || kotlin.math.abs(dy) > slop)) {
+                        dragging = true
+                    }
+                    if (dragging) {
+                        val (screenW, screenH) = DisplaySize.current(context)
+                        params.x = (startX + dx).toInt().coerceIn(0, (screenW - params.width).coerceAtLeast(0))
+                        params.y = (startY + dy).toInt().coerceIn(dp(48f), (screenH - params.height - dp(48f)).coerceAtLeast(dp(48f)))
+                        chipX = params.x; chipY = params.y
+                        runCatching { windowManager.updateViewLayout(v, params) }
+                        true
+                    } else false
+                }
+                MotionEvent.ACTION_UP, MotionEvent.ACTION_CANCEL -> {
+                    applyChipAlpha(true)
+                    if (dragging) {
+                        val (screenW, _) = DisplaySize.current(context)
+                        // 贴左右边缘：中心过半屏则吸右，否则吸左
+                        params.x = if (params.x + params.width / 2 >= screenW / 2) {
+                            (screenW - params.width - dp(8f)).coerceAtLeast(0)
+                        } else dp(8f)
+                        chipX = params.x; chipY = params.y
+                        runCatching { windowManager.updateViewLayout(v, params) }
+                        true // 拖动结束不触发点击
+                    } else false
+                }
+                else -> false
+            }
+        }
     }
 
     /**
@@ -376,9 +519,10 @@ class AccessibilityRecorder(
     fun togglePause(): Boolean {
         if (!running) return false
         paused = !paused
-        setTouchable(!paused)
+        // 触摸开关与转发串行：注入飞行中若直接改 NOT_TOUCHABLE 会打断手势
+        scope.launch { forwardMutex.withLock { setTouchable(!paused) } }
         // 恢复瞬间的那次抬手会落在刚变可触摸的录制层上，忽略掉，避免多点出一步
-        if (!paused) acceptInputFromMs = SystemClock.elapsedRealtime() + 250L
+        if (!paused) acceptInputFromMs = SystemClock.uptimeMillis() + 250L
         chip?.findViewWithTag<TextView>("record_pause")?.text = if (paused) "继续" else "暂停"
         chip?.findViewWithTag<TextView>("record_label")?.text =
             if (paused) "⏸ 已暂停 · ${steps.size} 步" else "● 录制中 · ${steps.size} 步"
@@ -478,7 +622,23 @@ class AccessibilityRecorder(
                     pointers.clear()
                 }
 
-                MotionEvent.ACTION_CANCEL -> pointers.clear()
+                MotionEvent.ACTION_CANCEL -> {
+                    // 系统取消（如多指中某指抬起触发）不要直接丢弃已采样手势，
+                    // 冲刷成一次记录+转发，否则这段操作游戏收不到也不进宏。
+                    if (pointers.isNotEmpty()) {
+                        pointers.values.forEach { trace -> trace.upAtMs = now }
+                        val primaryId = pointers.keys.first()
+                        onGesture(
+                            RecordedGesture(
+                                pointers = pointers.values.toList(),
+                                primarySamples = pointers[primaryId]?.samples.orEmpty(),
+                                downAtMs = downAtMs,
+                                upAtMs = now,
+                            ),
+                        )
+                    }
+                    pointers.clear()
+                }
             }
             return true
         }

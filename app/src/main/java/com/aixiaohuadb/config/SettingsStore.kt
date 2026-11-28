@@ -30,6 +30,7 @@ class SettingsStore(private val context: Context) : com.aixiaohuadb.voice.VoiceS
         val FEEDBACK_OVERLAY = booleanPreferencesKey("feedback_overlay")
         val TEMP_ALLOW = booleanPreferencesKey("temp_allow")
         val ONBOARDING_DONE = booleanPreferencesKey("onboarding_done_v1")
+        val EXTRA_GAME_PACKAGES = stringPreferencesKey("extra_game_packages")
         val TAU_COARSE = floatPreferencesKey("tau_coarse")
         val TAU_FINE = floatPreferencesKey("tau_fine")
         val TAU_CMD = floatPreferencesKey("tau_cmd")
@@ -41,6 +42,21 @@ class SettingsStore(private val context: Context) : com.aixiaohuadb.voice.VoiceS
     }
 
     suspend fun setOnboardingDone() = put(Keys.ONBOARDING_DONE, true)
+
+    /**
+     * 用户手动登记的游戏包名（渠道服 / 其它游戏），逗号分隔持久化。
+     * 用于前台识别兜底：[com.aixiaohuadb.service.ForegroundGameMonitor] 冷启动恢复此集合。
+     */
+    val extraGamePackagesFlow: Flow<Set<String>> = context.settingsDataStore.data.map { p ->
+        p[Keys.EXTRA_GAME_PACKAGES].orEmpty()
+            .split(',')
+            .map { it.trim() }
+            .filter { it.isNotEmpty() }
+            .toSet()
+    }
+
+    suspend fun setExtraGamePackages(packages: Set<String>) =
+        put(Keys.EXTRA_GAME_PACKAGES, packages.sorted().joinToString(","))
 
     /** 语音子系统总开关，默认 false；唯一真源，冷启动只读取不自动启动 */
     override val voiceEnabledFlow: Flow<Boolean> = context.settingsDataStore.data.map { p ->
