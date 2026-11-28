@@ -122,18 +122,30 @@ class MacroCodecTest {
     }
 
     @Test
-    fun `第一步的等待前置成 Wait 而不是变成步后延迟`() {
+    fun `一次点击只产生一步且首步准备延迟被丢弃`() {
+        // 回归：曾把首步 delayBeforeMs 前置成独立 Wait，导致"点一次记录两步"。
         val steps = MacroAdapter.toExecSteps(
             listOf(
                 MacroStep.Tap(x = 0.1f, y = 0.1f, delayBeforeMs = 500L),
                 MacroStep.Tap(x = 0.2f, y = 0.2f, delayBeforeMs = 300L),
             ),
         )
-        assertEquals(3, steps.size)
-        val wait = steps[0] as ExecStep.Wait
-        assertEquals(500L, wait.ms)
-        assertEquals(0L, (steps[1] as ExecStep.Tap).delayAfterMs)
-        assertEquals(300L, (steps[2] as ExecStep.Tap).delayAfterMs)
+        assertEquals("两次点击应恰好两步，没有额外 Wait", 2, steps.size)
+        assertEquals(0L, (steps[0] as ExecStep.Tap).delayAfterMs)
+        assertEquals(300L, (steps[1] as ExecStep.Tap).delayAfterMs)
+    }
+
+    @Test
+    fun `玩家显式插入的 Wait 步骤仍被保留`() {
+        val steps = MacroAdapter.toExecSteps(
+            listOf(
+                MacroStep.Wait(waitMs = 700L),
+                MacroStep.Tap(x = 0.1f, y = 0.1f),
+            ),
+        )
+        assertEquals(2, steps.size)
+        assertEquals(700L, (steps[0] as ExecStep.Wait).ms)
+        assertTrue(steps[1] is ExecStep.Tap)
     }
 
     @Test

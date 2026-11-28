@@ -199,6 +199,9 @@ class OverlayControlService : Service() {
      * 权限恢复后 reconcile 会因缓存为空而重新 addView。
      */
     private fun detachAllOverlayViews() {
+        // 权限撤销时录制层/胶囊同样会被系统摘掉，必须同步停掉录制状态，
+        // 否则权限恢复后表现为"没有胶囊但录制还在隐形继续"。
+        stopAllRecording()
         runCatching { ballPair?.first?.let { windowManager.removeView(it) } }
         ballPair = null
         ballStyleSig = null
@@ -216,13 +219,7 @@ class OverlayControlService : Service() {
     }
 
     override fun onDestroy() {
-        recordingSession++
-        accessibilityRecorder?.destroy()
-        accessibilityRecorder = null
-        runCatching { adbRecorder?.stop() }
-        adbRecorder = null
-        adbRecording = false
-        MacroRecordNotification.hide(this)
+        stopAllRecording()
         serviceScope?.cancel()
         executing.set(false)
         panelGeneration++
@@ -572,6 +569,13 @@ class OverlayControlService : Service() {
     // ---------------- 执行与反馈 ----------------
 
     private fun execute(w: OverlayWidget, view: TextView) {
+        // 录制中禁止回放：ADB 录制靠 getevent 被动监听，回放手势会被当作新步骤录进去；
+        // 无障碍录制虽被全屏层挡住按钮，这里统一兜底，保证"录制/停止/执行"状态一致。
+        if (isRecording()) {
+            Toast.makeText(this, "录制中无法执行宏，请先完成或取消录制", Toast.LENGTH_SHORT).show()
+            flashResult(w, view, false)
+            return
+        }
         val container = (application as App).container
         val action = when (w.kind) {
             // 固定指令已删除；旧 COMMAND 控件只反序列化兼容，点击一律拒绝
@@ -840,7 +844,15 @@ class OverlayControlService : Service() {
      * 无条件把 ADB 设为默认是错误的：绝大多数玩家的日常设备没有 root/ADB 常连，
      * 那样会让录制直接失效。智能降级兼顾了两种设备。
      */
+    /** 当前是否处于任一录制通道中（供入口守卫与执行互斥使用） */
+    private fun isRecording(): Boolean = adbRecording || accessibilityRecorder != null
+
     private fun startRecordingSmart() {
+        // 玩家误触保护：录制中再点"录制"不应悄悄清空已录步骤。
+        if (isRecording()) {
+            Toast.makeText(this, "正在录制中，请先完成或取消", Toast.LENGTH_SHORT).show()
+            return
+        }
         val client = (application as App).container.adbClient
         if (client.status.value.phase == AdbPhase.CONNECTED) {
             Log.d("OverlayControl", "smart record: ADB connected, try getevent first")
@@ -857,14 +869,29 @@ class OverlayControlService : Service() {
      * 不再以 ADB getevent 为主路径：那条路依赖 ADB 连接，且 Type A 只能按帧近似配对触点。
      * 默认路径不关心触摸协议，也不依赖 ADB 连接；ADB 高保真录制作为链路页的显式增强入口。
      */
-    private fun startRecording() {
-        // 上一次录制若停在异常状态（窗口被系统移除但对象还在），先彻底清理再重建，
-        // 否则入口会变成"点了没反应"。
+    /**
+     * 统一停止所有录制通道并回到空闲态。任何"开始录制 / 权限撤销 / 服务销毁 / 取消"都走这里，
+     * 保证两个通道不会并存，也不会出现"胶囊没了但录制还在跑"的隐形状态。
+     */
+    private fun stopAllRecording(clearPending: Boolean = true) {
+        recordingSession++
         accessibilityRecorder?.let { old ->
             runCatching { old.cancel() }
             runCatching { old.destroy() }
         }
         accessibilityRecorder = null
+        runCatching { adbRecorder?.stop() }
+        adbRecorder = null
+        adbRecording = false
+        MacroRecordNotification.hide(this)
+        hideAdbChip()
+        if (clearPending) OverlayStore.discardPendingMacro()
+    }
+
+    private fun startRecording() {
+        // 通道互斥：先彻底停掉可能并存的 ADB 录制（含其胶囊/通知），
+        // 否则玩家从链路页点 ADB 录制后再点普通录制，会两路同时工作。
+        stopAllRecording()
         closePanel()
         val recorder = AccessibilityRecorder(this, object : AccessibilityRecorder.Listener {
             override fun onStep(step: MacroStep) = Unit
@@ -885,9 +912,10 @@ class OverlayControlService : Service() {
 
     private fun finishAccessibilityRecording() {
         val recorder = accessibilityRecorder ?: return
-        accessibilityRecorder = null
         val steps = recorder.stop()
         recorder.destroy()
+        // 录制通道统一收敛（不动 pending，由下面的结果分支决定 stage 还是 discard）
+        stopAllRecording(clearPending = false)
         Log.d("OverlayControl", "finishRecording steps=${steps.size}")
         if (steps.isEmpty()) {
             OverlayStore.discardPendingMacro()
@@ -899,11 +927,9 @@ class OverlayControlService : Service() {
     }
 
     private fun cancelAccessibilityRecording() {
-        val recorder = accessibilityRecorder ?: return
-        accessibilityRecorder = null
-        recorder.cancel()
-        recorder.destroy()
-        OverlayStore.discardPendingMacro()
+        if (accessibilityRecorder == null && !adbRecording) return
+        stopAllRecording()
+        Toast.makeText(this, "已取消录制", Toast.LENGTH_SHORT).show()
     }
 
     /**
@@ -924,6 +950,13 @@ class OverlayControlService : Service() {
             return
         }
         if (adbRecording) return
+        // 通道互斥：清掉可能残留的无障碍录制器；但不要走完整的 stopAllRecording，
+        // 因为它会递增 session 并清 pending，这里只需停掉另一条通道。
+        accessibilityRecorder?.let { old ->
+            runCatching { old.cancel() }
+            runCatching { old.destroy() }
+        }
+        accessibilityRecorder = null
         closePanel()
         val scope = serviceScope ?: return
         val session = ++recordingSession
@@ -1007,30 +1040,22 @@ class OverlayControlService : Service() {
     }
 
     private fun finishAdbRecording() {
-        MacroRecordNotification.hide(this)
-        hideAdbChip()
-        recordingSession++
         if (!adbRecording) return
         val steps: List<ExecStep> = adbRecorder?.stop().orEmpty()
-        adbRecording = false
-        adbRecorder = null
+        stopAllRecording(clearPending = false)
         if (steps.isNotEmpty()) {
             OverlayStore.stagePendingMacro(steps)
             showNamingWindow()
         } else {
             OverlayStore.discardPendingMacro()
+            Toast.makeText(this, "没有录到操作，请重试", Toast.LENGTH_SHORT).show()
         }
     }
 
     private fun cancelAdbRecording() {
-        MacroRecordNotification.hide(this)
-        hideAdbChip()
-        recordingSession++
-        if (!adbRecording) return
-        adbRecorder?.stop()
-        adbRecording = false
-        adbRecorder = null
-        OverlayStore.discardPendingMacro()
+        if (!adbRecording && accessibilityRecorder == null) return
+        stopAllRecording()
+        Toast.makeText(this, "已取消录制", Toast.LENGTH_SHORT).show()
     }
 
     private fun showAdbChip() {

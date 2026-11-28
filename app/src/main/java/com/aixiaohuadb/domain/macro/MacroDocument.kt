@@ -127,13 +127,13 @@ object MacroAdapter {
     fun toExecSteps(doc: MacroDocument): List<ExecStep> = toExecSteps(doc.steps)
 
     fun toExecSteps(steps: List<MacroStep>): List<ExecStep> {
-        val out = ArrayList<ExecStep>(steps.size + 1)
+        val out = ArrayList<ExecStep>(steps.size)
         steps.forEachIndexed { index, step ->
-            // 执行器只有"步后延迟"，第一步的 delayBeforeMs 如果直接映射，
-            // 会变成整个宏跑完才等待。这里把它前置成显式 Wait。
-            if (index == 0 && step.delayBeforeMs > 0L) {
-                out += ExecStep.Wait(step.delayBeforeMs)
-            }
+            // 首步的 delayBeforeMs 来自"点录制 → 切到游戏 → 第一次操作"的准备间隔，
+            // 不是玩家想重现的操作节奏。过去把它前置成显式 ExecStep.Wait，
+            // 回填编辑器后变成"一次点击 = Wait + Tap 两步"，即用户报告的重复步骤。
+            // 这里首步延迟直接丢弃；后续步骤照常映射为步后延迟。
+            // 注意：玩家在编辑器里显式插入的 MacroStep.Wait 仍走下面的 Wait 分支，不受影响。
             val delayAfter = if (index == 0) 0L else step.delayBeforeMs
             out += when (step) {
                 is MacroStep.Tap -> ExecStep.Tap(
