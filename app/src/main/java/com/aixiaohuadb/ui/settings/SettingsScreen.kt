@@ -11,12 +11,10 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Mic
 import androidx.compose.material.icons.filled.NotificationsActive
 import androidx.compose.material.icons.filled.Security
-import androidx.compose.material.icons.filled.SportsEsports
 import androidx.compose.material.icons.filled.Tune
 import androidx.compose.material.icons.filled.VideogameAsset
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.MaterialTheme
-import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
@@ -73,9 +71,7 @@ fun SettingsScreen(
     val config by vm.config.collectAsState()
     val controlMode by vm.controlMode.collectAsState()
     val voiceEnabled by vm.voiceEnabled.collectAsState()
-    val extraGamePackages by vm.extraGamePackages.collectAsState()
     var pendingVoice by remember { mutableStateOf(false) }
-    var packageInput by remember { mutableStateOf("") }
     ScreenFrame(
         title = "设置",
         subtitle = "本地持久化 · ${BuildConfig.FLAVOR_NAME}",
@@ -132,48 +128,6 @@ fun SettingsScreen(
                     else vm.setControlMode(target)
                 },
             )
-        }
-
-        SectionCard(icon = Icons.Filled.SportsEsports, title = "游戏识别") {
-            Text(
-                "已内置王者荣耀正式服 / 体验服 / 国际服。渠道服或其它游戏在此登记包名，悬浮按钮才会只在该游戏前台显示。",
-                style = MaterialTheme.typography.labelSmall,
-                color = Muted,
-            )
-            if (extraGamePackages.isNotEmpty()) {
-                Spacer(Modifier.height(Spacing.xs))
-                extraGamePackages.toList().sorted().forEach { pkg ->
-                    Row(
-                        modifier = Modifier.fillMaxWidth(),
-                        verticalAlignment = androidx.compose.ui.Alignment.CenterVertically,
-                    ) {
-                        Text(
-                            pkg,
-                            style = MaterialTheme.typography.labelSmall,
-                            color = MaterialTheme.colorScheme.onSurface,
-                            modifier = Modifier.weight(1f),
-                        )
-                        TextButton(onClick = { vm.removeGamePackage(pkg) }) {
-                            Text("移除", color = androidx.compose.ui.graphics.Color(0xFFFF6B6B))
-                        }
-                    }
-                }
-            }
-            Spacer(Modifier.height(Spacing.xs))
-            OutlinedTextField(
-                value = packageInput,
-                onValueChange = { packageInput = it },
-                label = { Text("游戏包名") },
-                placeholder = { Text("com.example.game") },
-                singleLine = true,
-                modifier = Modifier.fillMaxWidth(),
-            )
-            Row(modifier = Modifier.fillMaxWidth()) {
-                QuietButton(text = "登记包名", onClick = {
-                    vm.addGamePackage(packageInput)
-                    packageInput = ""
-                }, enabled = packageInput.isNotBlank())
-            }
         }
 
         SectionCard(icon = Icons.Filled.Mic, title = "语音识别") {

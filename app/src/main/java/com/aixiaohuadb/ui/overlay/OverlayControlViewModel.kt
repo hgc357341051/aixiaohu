@@ -64,7 +64,7 @@ class OverlayControlViewModel(private val container: AppContainer) : ViewModel()
 
     fun setBallLocked(locked: Boolean) = OverlayStore.setBallLocked(locked)
 
-    fun removeMacro(macroId: Long) = OverlayStore.removeMacro(macroId)
+    fun removeMacro(macroId: Long) = container.removeMacroWithBinding(macroId)
 
     fun renameMacro(macroId: Long, name: String) = OverlayStore.renameMacro(macroId, name)
 

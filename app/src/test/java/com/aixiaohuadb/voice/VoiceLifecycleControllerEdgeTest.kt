@@ -289,4 +289,30 @@ class VoiceLifecycleControllerEdgeTest {
         }
         controller.close()
     }
+
+    @Test
+    fun `暂停后恢复真正回到RUNNING且机态同步`() = runTest {
+        // 回归：悬浮球双击暂停/面板恢复必须走 lifecycle.pause()/resume()。
+        // 若暂停只发状态机事件而不改 lifecycle._state，resume() 会因仍是 RUNNING 空转。
+        val audio = EdgeAudio(startResult = true)
+        val machine = VoiceStateMachine({ AppConfig.DEFAULT }, { "宏" })
+        val controller = VoiceLifecycleController(
+            null, EdgeSettings(), EdgePipeline(), audio,
+            machine, EdgeModel(), this,
+        )
+
+        assertTrue(controller.enable(VoiceStartReason.SETTINGS_TOGGLE).isSuccess)
+        val startsAfterEnable = audio.startCount
+
+        controller.pause()
+        assertEquals(VoiceLifecycleState.PAUSED, controller.state.value)
+        assertEquals(VoiceState.PAUSED, machine.currentState())
+
+        controller.resume()
+        assertEquals(VoiceLifecycleState.RUNNING, controller.state.value)
+        assertEquals(VoiceState.LISTEN, machine.currentState())
+        assertEquals("恢复应重新拉起采集", startsAfterEnable + 1, audio.startCount)
+        assertTrue(controller.voiceEnabled.value)
+        controller.close()
+    }
 }

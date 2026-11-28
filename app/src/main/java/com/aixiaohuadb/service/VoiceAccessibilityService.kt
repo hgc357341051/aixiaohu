@@ -32,12 +32,7 @@ class VoiceAccessibilityService : AccessibilityService(), GestureSink {
         instance = this
     }
 
-    override fun onAccessibilityEvent(event: AccessibilityEvent?) {
-        // 前台窗口包名事件直达 ForegroundGameMonitor，悬浮按钮即时显隐
-        if (event?.eventType == AccessibilityEvent.TYPE_WINDOW_STATE_CHANGED) {
-            ForegroundGameMonitor.notifyForegroundPackage(event.packageName?.toString())
-        }
-    }
+    override fun onAccessibilityEvent(event: AccessibilityEvent?) = Unit
 
     override fun onInterrupt() = Unit
 

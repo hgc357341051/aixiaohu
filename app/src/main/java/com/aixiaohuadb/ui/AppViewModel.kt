@@ -47,7 +47,11 @@ class AppViewModel(private val container: AppContainer) : ViewModel() {
 
     private val handler = container.createActionHandler { type, text ->
         addLog("${type.name} $text")
-        _ui.update { it.copy(toast = text) }
+        // 三个反馈开关的真实消费：TTS/震动/浮层提示由 feedbackDispatcher 按 config 分流。
+        // 浮层提示（toast）是否显示也交给它决定，关闭 feedbackOverlay 后不再遮挡游戏 HUD。
+        container.feedbackDispatcher.dispatch(type, text) { hint ->
+            _ui.update { it.copy(toast = hint) }
+        }
     }
 
     init {

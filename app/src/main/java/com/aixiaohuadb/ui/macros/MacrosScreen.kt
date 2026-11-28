@@ -102,7 +102,7 @@ fun MacrosScreen(
                 Column(Modifier.weight(1f)) {
                     Text("悬浮窗", style = MaterialTheme.typography.bodySmall, fontWeight = FontWeight.Bold)
                     Text(
-                        if (overlayEnabled) "游戏中显示悬浮球与宏按钮" else "已关闭：悬浮球与宏按钮全部隐藏",
+                        if (overlayEnabled) "全局显示悬浮球与宏按钮" else "已关闭：悬浮球与宏按钮全部隐藏",
                         style = MaterialTheme.typography.labelSmall,
                         color = Muted,
                     )

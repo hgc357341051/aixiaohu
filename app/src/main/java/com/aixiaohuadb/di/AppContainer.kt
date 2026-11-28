@@ -38,7 +38,6 @@ import com.aixiaohuadb.machine.VoiceStateMachine
 import com.aixiaohuadb.macro.MacroBindingStore
 import com.aixiaohuadb.monitor.Telemetry
 import com.aixiaohuadb.service.ControlMode
-import com.aixiaohuadb.service.ForegroundGameMonitor
 import com.aixiaohuadb.service.MacroResolver
 import com.aixiaohuadb.service.OverlayStore
 import com.aixiaohuadb.service.VoiceAccessibilityService
@@ -87,8 +86,25 @@ class AppContainer(private val context: Context) {
     @Volatile
     private var inferenceFactory: InferenceFactory = DemoInferenceFactory()
 
+    /** 执行反馈（震动/TTS/浮层提示）的真实消费端，开关从 config 实时读取 */
+    val feedbackDispatcher = com.aixiaohuadb.machine.FeedbackDispatcher(context.applicationContext) { config }
+
     /** 语音指令槽位 → 用户宏；推理层不感知宏内容 */
     val macroBindingStore = MacroBindingStore(context)
+
+    /**
+     * 删除宏并联动清理指向它的所有语音槽位绑定。
+     * 单删 OverlayStore 会让绑定残留：设置页仍显示已删短语、槽位被占死，
+     * 虽然 MacroBindingStore.resolve 不会误执行，但用户无法重新绑定该槽位。
+     */
+    fun removeMacroWithBinding(macroId: Long) {
+        OverlayStore.removeMacro(macroId)
+        scope.launch {
+            macroBindingStore.bindings.value
+                .filter { it.macroId == macroId }
+                .forEach { macroBindingStore.unbind(it.slot) }
+        }
+    }
 
     val stateMachine = VoiceStateMachine(
         { config },
@@ -201,12 +217,6 @@ class AppContainer(private val context: Context) {
         voiceLifecycle.restorePersistedState()
         scope.launch {
             settingsStore.configFlow.collect { updateConfig(it) }
-        }
-        // 恢复用户登记的游戏包名（渠道服/其它游戏），供前台识别兜底
-        scope.launch {
-            settingsStore.extraGamePackagesFlow.collect { pkgs ->
-                ForegroundGameMonitor.replaceRegisteredPackages(pkgs)
-            }
         }
         scope.launch {
             adbClient.status.collect { updateRuntimeMetrics() }
@@ -386,5 +396,6 @@ class AppContainer(private val context: Context) {
         adbBridgeController.stop()
         adbClient.close()
         stateMachine.close()
+        feedbackDispatcher.shutdown()
     }
 }

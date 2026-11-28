@@ -212,7 +212,7 @@ fun AppNavHost(
                         nav.navigate("home/executing") { launchSingleTop = true }
                     },
                     onEdit = { macroId -> nav.navigate("macro_editor/$macroId") },
-                    onDelete = { macroId -> OverlayStore.removeMacro(macroId) },
+                    onDelete = { macroId -> container.removeMacroWithBinding(macroId) },
                     onNew = startRecordingAndBackground,
                 )
             }
@@ -239,7 +239,7 @@ fun AppNavHost(
                         }
                     },
                     onDelete = { id ->
-                        OverlayStore.removeMacro(id)
+                        container.removeMacroWithBinding(id)
                         nav.popBackStack()
                     },
                 )

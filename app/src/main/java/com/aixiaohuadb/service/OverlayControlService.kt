@@ -1,9 +1,14 @@
 package com.aixiaohuadb.service
 
+import android.app.Notification
+import android.app.NotificationChannel
+import android.app.NotificationManager
+import android.app.PendingIntent
 import android.app.Service
 import android.content.Context
 import android.content.Intent
 import android.graphics.PixelFormat
+import android.graphics.drawable.Icon
 import android.os.IBinder
 import android.provider.Settings
 import android.view.GestureDetector
@@ -16,21 +21,21 @@ import android.widget.TextView
 import android.util.Log
 import android.widget.Toast
 import androidx.core.app.NotificationManagerCompat
+import androidx.core.content.ContextCompat
 import com.aixiaohuadb.App
+import com.aixiaohuadb.R
 import com.aixiaohuadb.adb.AdbClient
 import com.aixiaohuadb.adb.AdbPhase
 import com.aixiaohuadb.adb.AdbTouchRecorder
 import com.aixiaohuadb.domain.macro.MacroAdapter
 import com.aixiaohuadb.domain.macro.MacroStep
 import com.aixiaohuadb.exec.DisplaySize
-import com.aixiaohuadb.exec.ExecutionGuard
 import com.aixiaohuadb.exec.ExecStep
-import com.aixiaohuadb.inference.api.ControlWord
-import com.aixiaohuadb.machine.VoiceEvent
 import com.aixiaohuadb.machine.VoiceState
 import com.aixiaohuadb.service.recorder.AccessibilityRecorder
 import com.aixiaohuadb.ui.MainActivity
 import com.aixiaohuadb.voice.VoiceAction
+import com.aixiaohuadb.voice.VoiceLifecycleState
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
@@ -45,9 +50,11 @@ import java.util.concurrent.atomic.AtomicBoolean
 /**
  * 统一悬浮控制中心：悬浮球（语音入口）+ 指令按钮 + 自定义宏按钮 + 游戏内调节面板 + 逐点录制备份。
  *
- * 显示规则：悬浮球常驻（全局面板/语音入口，不随前台切换显隐，杜绝抖动）；
- * 宏按钮仅在目标游戏前台（或面板打开预览）显示。球/按钮均以"幂等对齐"方式渲染，
- * 目标态未变绝不触碰 WindowManager。
+ * 显示规则：全局常驻。悬浮球与所有启用的宏按钮只由「总开关 + 悬浮窗权限 + 服务存活」决定，
+ * 不读包名、不读前台三态、不随应用/游戏切换 add/remove。这样玩家一进游戏就能看到并点到按钮，
+ * 不会经历"先出现一帧再被前台事件移除"的闪烁。球/按钮均以幂等对齐方式渲染，
+ * 目标态未变绝不触碰 WindowManager。常驻服务用低优先级前台通知保活，
+ * 避免进入游戏后进程被回收导致 onDestroy 拆掉全部悬浮件。
  * 执行：MACRO → MacroResolver（COMMAND 仅兼容反序列化，不执行）；全局 CAS 执行锁防连点；
  * 反馈用按钮自身闪色（绿成功 / 红失败）替代 Toast。
  */
@@ -88,7 +95,6 @@ class OverlayControlService : Service() {
     // 状态缓存
     private var widgets: List<OverlayWidget> = emptyList()
     private var ballCfg = BallConfig()
-    private var scope: ForegroundScope = ForegroundScope.Other
     private var controlMode = ControlMode.DEFAULT
     private var voiceEnabled = false
     private var overlayEnabled = true
@@ -98,7 +104,6 @@ class OverlayControlService : Service() {
     private data class OverlayState(
         val widgets: List<OverlayWidget>,
         val ball: BallConfig,
-        val scope: ForegroundScope,
         val mode: ControlMode,
         val voiceEnabled: Boolean,
         val overlayEnabled: Boolean,
@@ -111,30 +116,29 @@ class OverlayControlService : Service() {
             stopSelf()
             return
         }
+        // 前台服务保活：进游戏后系统不会把普通后台 Service 直接杀掉并在 onDestroy 里拆掉全部悬浮件。
+        // 低优先级常驻通知是"全局悬浮窗稳定存在"的必要代价，用户可从通知一键关闭悬浮窗。
+        createOverlayNotificationChannel()
+        runCatching { startForeground(OVERLAY_NOTIFICATION_ID, buildOverlayNotification()) }
+            .onFailure { Log.w("OverlayControl", "startForeground failed", it) }
+
         windowManager = getSystemService(WINDOW_SERVICE) as WindowManager
         OverlayStore.init(applicationContext)
-        ForegroundGameMonitor.initSelfPackage(packageName)
         serviceScope = CoroutineScope(SupervisorJob() + Dispatchers.Main.immediate)
 
-        // 唯一渲染入口：所有状态（含前台三态）汇入一个 combine，一次变化只 reconcile 一次。
-        // 过去 foregroundPackage 有独立 collector，同一次窗口切换渲染两轮、用不同快照互相覆盖，
-        // 是"时显时隐"的根因。此处彻底合并为单入口。
+        // 唯一渲染入口：只观察"用户配置 + 总开关"，彻底移除包名/前台三态输入。
+        // 前台切换不再触发 reconcile，因此不存在"按钮被 add 一帧后立刻 remove"的窗口。
         serviceScope?.launch {
             combine(
                 OverlayStore.widgets,
                 OverlayStore.ball,
-                ForegroundGameMonitor.scope,
                 OverlayStore.controlMode,
                 (application as App).container.voiceLifecycle.voiceEnabled,
-            ) { w, b, s, m, v -> OverlayState(w, b, s, m, v, true) }
-                // combine 原生重载最多 5 路；总开关单独再串一层，保持类型安全
-                .combine(OverlayStore.overlayEnabled) { state, enabled ->
-                    state.copy(overlayEnabled = enabled)
-                }
+                OverlayStore.overlayEnabled,
+            ) { w, b, m, v, enabled -> OverlayState(w, b, m, v, enabled) }
                 .collect { state ->
                     widgets = state.widgets
                     ballCfg = state.ball
-                    scope = state.scope
                     voiceEnabled = state.voiceEnabled
                     overlayEnabled = state.overlayEnabled
                     val modeChanged = controlMode != state.mode
@@ -144,12 +148,11 @@ class OverlayControlService : Service() {
                 }
         }
 
-        // 前台兜底轮询 + 权限健康检测
+        // 只做权限健康检测：系统撤销悬浮窗权限时会移除所有 overlay，
+        // 必须同步清掉本地视图缓存，否则重新授予后 updateViewLayout 全失败、悬浮件永远回不来。
+        // 1s 一次仅调用 Settings.canDrawOverlays，无 UsageStats/无障碍事件扫描开销。
         serviceScope?.launch {
             while (isActive) {
-                // 权限在运行中被撤销/恢复：系统撤销时会移除所有 overlay，
-                // 必须同步清掉本地视图缓存，否则重新授予后 updateViewLayout 全失败、
-                // 悬浮件永远回不来（"显示后消失且不再恢复"的经典症状）。
                 val granted = Settings.canDrawOverlays(this@OverlayControlService)
                 if (granted != overlayPermissionGranted) {
                     overlayPermissionGranted = granted
@@ -161,51 +164,25 @@ class OverlayControlService : Service() {
                         detachAllOverlayViews()
                     }
                 }
-                if (granted) {
-                    val pkg = detectForegroundPackage()
-                    ForegroundGameMonitor.publishForegroundPackage(pkg)
-                }
-                delay(500)
+                delay(1_000L)
             }
         }
-    }
-
-    /**
-     * 轮询检测当前前台包名：只读 UsageStats 的 ACTIVITY_RESUMED。
-     *
-     * 关键修复：过去查不到事件时回退到 lastForegroundPackage（可能已过期），
-     * 10 秒后突然把 scope 覆盖成 Self/Other，是"球显示后又消失"的元凶之一。
-     * 现在查不到就返回 null，由 ForegroundGameMonitor.update 忽略，保持当前稳定态。
-     */
-    private fun detectForegroundPackage(): String? {
-        if (!com.aixiaohuadb.util.PermissionState.usageAccessGranted(applicationContext)) return null
-        val usm = getSystemService(Context.USAGE_STATS_SERVICE) as? android.app.usage.UsageStatsManager
-            ?: return null
-        val now = System.currentTimeMillis()
-        return runCatching {
-            val events = usm.queryEvents(now - 6_000L, now) ?: return@runCatching null
-            var last: String? = null
-            val ev = android.app.usage.UsageEvents.Event()
-            while (events.hasNextEvent()) {
-                events.getNextEvent(ev)
-                if (ev.eventType == android.app.usage.UsageEvents.Event.ACTIVITY_RESUMED) {
-                    last = ev.packageName
-                }
-            }
-            last
-        }.getOrNull()
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
         when (intent?.action) {
-            ACTION_START_RECORD -> startRecording()
             ACTION_START_SMART_RECORD -> startRecordingSmart()
             ACTION_START_ADB_RECORD -> startAdbRecording()
             ACTION_REFRESH -> refreshOverlay()
+            ACTION_DISABLE -> {
+                OverlayStore.setOverlayEnabled(false)
+                stopSelf()
+                return START_NOT_STICKY
+            }
             MacroRecordNotification.ACTION_FINISH_RECORD -> finishAdbRecording()
             MacroRecordNotification.ACTION_CANCEL_RECORD -> cancelAdbRecording()
         }
-        // STICKY：进程被系统回收后自动重建服务，悬浮球恢复常驻；
+        // STICKY + 前台通知：进程被系统回收后自动重建服务，悬浮件恢复常驻；
         // 无权限时 onCreate 会 stopSelf，不会无限重启。
         return START_STICKY
     }
@@ -255,15 +232,53 @@ class OverlayControlService : Service() {
 
     override fun onBind(intent: Intent?): IBinder? = null
 
+    // ---------------- 前台保活通知 ----------------
+
+    private fun createOverlayNotificationChannel() {
+        val manager = getSystemService(NotificationManager::class.java) ?: return
+        if (manager.getNotificationChannel(OVERLAY_CHANNEL_ID) != null) return
+        manager.createNotificationChannel(
+            NotificationChannel(
+                OVERLAY_CHANNEL_ID,
+                "悬浮控制",
+                NotificationManager.IMPORTANCE_LOW,
+            ).apply {
+                description = "保持全局悬浮球与宏按钮在游戏内外稳定显示"
+                setShowBadge(false)
+            },
+        )
+    }
+
+    private fun buildOverlayNotification(): Notification {
+        val flags = PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
+        val open = PendingIntent.getActivity(
+            this, 0, Intent(this, MainActivity::class.java), flags,
+        )
+        val disable = PendingIntent.getService(
+            this, 1, Intent(this, OverlayControlService::class.java).setAction(ACTION_DISABLE), flags,
+        )
+        return Notification.Builder(this, OVERLAY_CHANNEL_ID)
+            .setSmallIcon(R.drawable.ic_overlay_controller_silhouette)
+            .setContentTitle("小胡 · 悬浮控制")
+            .setContentText("全局悬浮球已开启，可随时展开面板")
+            .setContentIntent(open)
+            .setOngoing(true)
+            .addAction(
+                Notification.Action.Builder(
+                    Icon.createWithResource(this, android.R.drawable.ic_delete),
+                    "关闭悬浮窗",
+                    disable,
+                ).build(),
+            )
+            .build()
+    }
+
     // ---------------- 统一渲染 ----------------
 
-    /** 供执行反馈 / 面板标签使用，派生自单一真源 */
-    private val gameVisible: Boolean get() = scope == ForegroundScope.Game
-
     /**
-     * 唯一渲染入口：把当前状态映射到"目标显示集合"，再幂等地对齐实际窗口。
-     * 幂等是关键：目标态没变就不碰 WindowManager，避免滑条/重复事件触发无效 updateViewLayout
-     * 造成的抖动与"点了没反应"。
+     * 唯一渲染入口：把当前配置映射到"目标显示集合"，再幂等地对齐实际窗口。
+     * 目标集合不再读取前台包名/应用状态；进游戏、切 App、系统弹窗都不会触发 add/remove。
+     * 幂等是关键：目标态没变就不碰 WindowManager，避免滑条/重复事件触发无效 updateViewLayout。
      */
     private fun reconcile() {
         // 总开关关闭：清空所有悬浮件
@@ -274,18 +289,10 @@ class OverlayControlService : Service() {
             return
         }
 
-        // ---- 悬浮球：常驻显示。它是全局面板/语音入口，不随前台应用切换而 add/remove。
-        // 过去 scope==Self 就移除、离开再重建，玩家看到的就是"切进设置球没了、回来又冒出来"。
-        // 常驻后只有总开关关闭或权限失效才移除，显隐抖动从根上消失。----
+        // 悬浮球与所有启用的宏按钮全局常驻：只在配置变化、权限变化、服务重启时对齐一次。
         applyBall(ballCfg.visible)
 
-        // ---- 宏按钮：只在目标游戏前台显示；面板打开时也显示以便预览 ----
-        // 修复过去常量短路导致"除自家 App 外到处显示"、非游戏场景误触的问题。
-        val buttonShown = when (scope) {
-            ForegroundScope.Game -> widgets.filter { it.enabled }
-            ForegroundScope.Self -> emptyList()
-            ForegroundScope.Other -> if (panelOpen) widgets.filter { it.enabled } else emptyList()
-        }
+        val buttonShown = widgets.filter { it.enabled }
         buttonViews.keys.toList().forEach { id ->
             val cfg = buttonShown.firstOrNull { it.id == id }
             if (cfg == null) removeButton(id) else updateButton(cfg)
@@ -424,12 +431,15 @@ class OverlayControlService : Service() {
             }
 
             override fun onDoubleTap(e: MotionEvent): Boolean {
-                // 双击快捷暂停/恢复语音：生命周期 DISABLED 后一律不响应
+                // 双击快捷暂停/恢复语音：生命周期 DISABLED 后一律不响应。
+                // 必须走 lifecycle.pause()/resume()，不能只发状态机事件——否则
+                // lifecycle._state 停在 RUNNING，面板"恢复语音"调用 resume() 命中 else 空转。
                 val lifecycle = (application as App).container.voiceLifecycle
                 if (lifecycle.isVoiceActionAllowed(VoiceAction.PAUSE_RESUME_VIA_BALL)) {
-                    (application as App).container.stateMachine.send(
-                        VoiceEvent.ControlDetected(ControlWord.C3_PAUSE, 1f),
-                    )
+                    serviceScope?.launch {
+                        if (lifecycle.state.value == VoiceLifecycleState.PAUSED) lifecycle.resume()
+                        else lifecycle.pause()
+                    }
                 }
                 return true
             }
@@ -583,13 +593,8 @@ class OverlayControlService : Service() {
             flashResult(w, view, false)
             return
         }
-        // 回放安全校验：其它 App 前台时拒绝执行，避免悬浮按钮被误触后点到当前界面。
-        // Self（面板预览/设置）与 Game（正常对局）都允许；只有 Other 是明确的高风险场景。
-        if (scope == ForegroundScope.Other) {
-            Toast.makeText(this, "当前不在游戏前台，已取消回放以免误触", Toast.LENGTH_SHORT).show()
-            flashResult(w, view, false)
-            return
-        }
+        // 全局常驻策略：不再按前台包名拒绝执行。按钮在任何界面可见即可点，
+        // 误触风险由用户主动点击与执行中取消令牌承担，而不是靠"猜当前是不是游戏"。
         // ADB 链断连且无障碍也被撤回时，执行链会落到只读提示；这里提前给出可操作的引导。
         val adbConnected = container.adbClient.status.value.phase == AdbPhase.CONNECTED
         val a11yAlive = VoiceAccessibilityService.instance != null
@@ -620,9 +625,9 @@ class OverlayControlService : Service() {
             }
             try {
                 // 手动回放走独立执行链：语音关闭后的取消令牌不得影响面板宏按钮。
-                // extraGuard：一旦前台切到其它 App 立即中断，避免宏继续点到非游戏界面。
-                val leaveGameGuard = ExecutionGuard { ForegroundGameMonitor.scope.value == ForegroundScope.Other }
-                val outcome = runCatching { container.executeManual(action, leaveGameGuard) }
+                // 全局常驻策略下不再按包名/前台状态中断：按钮可见即允许执行，
+                // 用户取消仍由 ManualExecutionToken（面板停止/服务销毁）负责。
+                val outcome = runCatching { container.executeManual(action) }
                 val result = outcome.getOrNull()
                 val ok = result?.success == true
                 Log.d(
@@ -633,12 +638,6 @@ class OverlayControlService : Service() {
                     Toast.makeText(
                         this@OverlayControlService,
                         "宏执行失败：${result?.message ?: outcome.exceptionOrNull()?.message ?: "未知原因"}",
-                        Toast.LENGTH_LONG,
-                    ).show()
-                } else if (!gameVisible) {
-                    Toast.makeText(
-                        this@OverlayControlService,
-                        "已执行 ${action.steps.size} 步；当前不在游戏前台，可能看不到效果",
                         Toast.LENGTH_LONG,
                     ).show()
                 }
@@ -739,9 +738,7 @@ class OverlayControlService : Service() {
                 onPauseVoice = {
                     val lifecycle = (application as App).container.voiceLifecycle
                     if (lifecycle.isVoiceActionAllowed(VoiceAction.PAUSE_RESUME_VIA_BALL)) {
-                        (application as App).container.stateMachine.send(
-                            VoiceEvent.ControlDetected(ControlWord.C3_PAUSE, 1f),
-                        )
+                        serviceScope?.launch { lifecycle.pause() }
                     }
                 },
                 onResumeVoice = {
@@ -811,9 +808,9 @@ class OverlayControlService : Service() {
             VoiceState.IDLE, VoiceState.ERROR, VoiceState.UNLOAD_WAKE -> "待机"
             VoiceState.DISABLED -> "语音已关闭"
         }
-        val gameLabel = if (gameVisible) "王者荣耀" else "非游戏"
+        val scopeLabel = "全局"
         val adbLabel = if (container.adbClient.status.value.phase == com.aixiaohuadb.adb.AdbPhase.CONNECTED) "ADB" else "无障碍"
-        return "$voiceLabel · $gameLabel · $adbLabel"
+        return "$voiceLabel · $scopeLabel · $adbLabel"
     }
 
     private fun closePanel() {
@@ -1150,15 +1147,23 @@ class OverlayControlService : Service() {
     }
 
     companion object {
-        /** 宏按钮在游戏中常驻：面板关闭后仍可点击回放（当前为固定行为，无 UI 开关） */
+        private const val OVERLAY_CHANNEL_ID = "overlay_control_channel"
+        private const val OVERLAY_NOTIFICATION_ID = 1003
+
+        /** 宏按钮全局常驻：面板关闭后仍可点击回放（当前为固定行为，无 UI 开关） */
         const val keepButtonsWhenPanelClosed = true
 
         /** 基准坐标 1080 宽，x>=1079 视为贴右边缘；多步如此通常意味着录制方向错了 */
         private const val MACRO_EDGE_X = 1079
 
         fun start(context: Context) {
-            if (!Settings.canDrawOverlays(context)) return
-            runCatching { context.startService(Intent(context, OverlayControlService::class.java)) }
+            if (!OverlayStore.overlayEnabled.value || !Settings.canDrawOverlays(context)) return
+            startAsForeground(context, Intent(context, OverlayControlService::class.java))
+        }
+
+        /** 所有启动路径都走 FGS：前台调用和录音/录制切后台后都不会被系统随手回收 */
+        private fun startAsForeground(context: Context, intent: Intent) {
+            runCatching { ContextCompat.startForegroundService(context, intent) }
         }
 
         /**
@@ -1172,7 +1177,7 @@ class OverlayControlService : Service() {
             }
             val intent = Intent(context, OverlayControlService::class.java)
                 .setAction(ACTION_START_SMART_RECORD)
-            runCatching { context.startService(intent) }
+            startAsForeground(context, intent)
         }
 
         /** 从链路页发起 ADB 高保真录制；服务会检查连接状态并显示录制胶囊。 */
@@ -1183,7 +1188,7 @@ class OverlayControlService : Service() {
             }
             val intent = Intent(context, OverlayControlService::class.java)
                 .setAction(ACTION_START_ADB_RECORD)
-            runCatching { context.startService(intent) }
+            startAsForeground(context, intent)
         }
 
         fun stop(context: Context) {
@@ -1192,16 +1197,16 @@ class OverlayControlService : Service() {
 
         /** 权限页授权完成后调用：服务在跑则立即重建悬浮件，未跑则拉起 */
         fun refresh(context: Context) {
-            if (!Settings.canDrawOverlays(context)) return
+            if (!OverlayStore.overlayEnabled.value || !Settings.canDrawOverlays(context)) return
             val intent = Intent(context, OverlayControlService::class.java).setAction(ACTION_REFRESH)
-            runCatching { context.startService(intent) }
+            startAsForeground(context, intent)
         }
 
         fun isPermissionGranted(context: Context): Boolean = Settings.canDrawOverlays(context)
 
-        const val ACTION_START_RECORD = "com.aixiaohuadb.action.START_RECORD"
         const val ACTION_START_SMART_RECORD = "com.aixiaohuadb.action.START_SMART_RECORD"
         const val ACTION_START_ADB_RECORD = "com.aixiaohuadb.action.START_ADB_RECORD"
         const val ACTION_REFRESH = "com.aixiaohuadb.action.REFRESH"
+        const val ACTION_DISABLE = "com.aixiaohuadb.action.DISABLE_OVERLAY"
     }
 }
