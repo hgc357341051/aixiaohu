@@ -22,6 +22,7 @@ import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
@@ -40,6 +41,7 @@ import com.aixiaohuadb.ui.common.Segment
 import com.aixiaohuadb.ui.common.ToggleRow
 import com.aixiaohuadb.ui.theme.Muted
 import com.aixiaohuadb.ui.theme.Spacing
+import com.aixiaohuadb.ui.theme.Warn
 
 @Composable
 fun SettingsScreen(
@@ -49,8 +51,25 @@ fun SettingsScreen(
     onMapping: () -> Unit,
     onAdb: () -> Unit,
     onOverlay: () -> Unit,
+    onPermissions: () -> Unit,
     onDebug: () -> Unit,
 ) {
+    val context = androidx.compose.ui.platform.LocalContext.current
+    val lifecycleOwner = androidx.compose.ui.platform.LocalLifecycleOwner.current
+    var permissionRevision by remember { mutableIntStateOf(0) }
+    androidx.compose.runtime.DisposableEffect(lifecycleOwner) {
+        val observer = androidx.lifecycle.LifecycleEventObserver { _, event ->
+            if (event == androidx.lifecycle.Lifecycle.Event.ON_RESUME) {
+                permissionRevision++
+                // 从系统设置授权返回后立即让服务重建悬浮件，避免"授权了但球不回来"
+                com.aixiaohuadb.service.OverlayControlService.refresh(context)
+            }
+        }
+        lifecycleOwner.lifecycle.addObserver(observer)
+        onDispose { lifecycleOwner.lifecycle.removeObserver(observer) }
+    }
+    // 读取 revision 触发重组，实时反映权限状态
+    permissionRevision
     val config by vm.config.collectAsState()
     val controlMode by vm.controlMode.collectAsState()
     val voiceEnabled by vm.voiceEnabled.collectAsState()
@@ -63,6 +82,41 @@ fun SettingsScreen(
         activeTab = "settings",
         onTab = onTab,
     ) {
+        val corePerms = listOf(
+            "悬浮窗" to com.aixiaohuadb.util.PermissionState.overlayGranted(context),
+            "无障碍" to com.aixiaohuadb.util.PermissionState.accessibilityEnabled(context),
+            "后台运行" to com.aixiaohuadb.util.PermissionState.batteryOptimizationIgnored(context),
+        )
+        val coreGranted = corePerms.count { it.second }
+        SectionCard(icon = Icons.Filled.Security, title = "权限中心") {
+            Text(
+                "核心权限 $coreGranted/${corePerms.size} 项就绪。悬浮窗/无障碍被系统回收后，悬浮按钮会失效。",
+                style = MaterialTheme.typography.labelSmall,
+                color = Muted,
+            )
+            Spacer(Modifier.height(Spacing.xs))
+            corePerms.forEach { (name, ok) ->
+                Row(
+                    modifier = Modifier.fillMaxWidth().padding(vertical = 2.dp),
+                    verticalAlignment = androidx.compose.ui.Alignment.CenterVertically,
+                ) {
+                    Text(
+                        "${if (ok) "●" else "○"} $name",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = if (ok) androidx.compose.ui.graphics.Color(0xFF3DF5C8) else Warn,
+                        modifier = Modifier.weight(1f),
+                    )
+                    Text(
+                        if (ok) "已授予" else "待授权",
+                        style = MaterialTheme.typography.labelSmall,
+                        color = if (ok) Muted else Warn,
+                    )
+                }
+            }
+            Spacer(Modifier.height(Spacing.xs))
+            QuietButton(text = if (coreGranted < corePerms.size) "前往授权 / 重新申请" else "查看全部权限", onClick = onPermissions)
+        }
+
         SectionCard(icon = Icons.Filled.VideogameAsset, title = "控制模式") {
             Text(
                 "默认无障碍模式，不拾音；语音需显式确认；ADB 保持后台长连接。",

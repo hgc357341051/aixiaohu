@@ -3,6 +3,7 @@ package com.aixiaohuadb.service
 import android.content.Context
 import android.app.usage.UsageEvents
 import android.app.usage.UsageStatsManager
+import android.util.Log
 import com.aixiaohuadb.util.PermissionState
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
@@ -56,6 +57,14 @@ object ForegroundGameMonitor {
     /** 初始化自家包名（App.onCreate 或服务启动时调用一次） */
     fun initSelfPackage(pkg: String) { selfPackageName = pkg }
 
+    /** 已知的系统/输入法包名：这些窗口事件不代表前台应用切换，必须忽略 */
+    private val NOISE_PACKAGES = setOf(
+        "com.android.systemui",
+        "com.android.inputmethod.latin",
+        "com.google.android.inputmethod.latin",
+        "com.android.settings",
+    )
+
     // ---- 单一真源 ----
     private val _scope = MutableStateFlow<ForegroundScope>(ForegroundScope.Other)
     val scope: StateFlow<ForegroundScope> = _scope.asStateFlow()
@@ -65,25 +74,56 @@ object ForegroundGameMonitor {
     var lastForegroundPackage: String? = null
         private set
 
-    /** 由 resolve 结果写入唯一真源；值相同则忽略，天然去重 */
-    private fun update(pkg: String?) {
+    /** 待确认的 Other 包名：需连续命中两次才提交，避免 UsageStats 偶发抖动 */
+    private var pendingOtherPkg: String? = null
+
+    /**
+     * 由 resolve 结果写入唯一真源；值相同则忽略，天然去重。
+     *
+     * [authoritative] 表示来自 UsageStats 轮询（前台应用的权威判定）。
+     * 无障碍窗口事件是非权威的：游戏内弹窗/输入法/系统 UI 都会触发
+     * TYPE_WINDOW_STATE_CHANGED，其 packageName 往往是窗口所有者而非前台应用。
+     * 已通过 [NOISE_PACKAGES] 过滤已知系统包名；对陌生包的"离开游戏"判定：
+     * 权威通道一次即确认，非权威通道需连续两次命中同一包名（去抖），
+     * 避免一闪而过的窗口把玩家从游戏态打翻，同时无 UsageStats 权限时也能稳定识别。
+     */
+    private fun update(pkg: String?, authoritative: Boolean) {
         if (pkg == null) return
-        lastForegroundPackage = pkg
+        if (pkg in NOISE_PACKAGES) return
         val next = when {
             isTargetPackage(pkg) -> ForegroundScope.Game
             pkg == selfPackageName -> ForegroundScope.Self
             else -> ForegroundScope.Other
         }
-        if (_scope.value != next) _scope.value = next
+        // "离开游戏/自家"属负向信号：需要去抖，避免一闪而过的窗口把玩家从游戏态打翻。
+        // 权威通道（UsageStats 轮询）一次即确认；非权威（无障碍窗口事件）连续两次才确认。
+        if (next == ForegroundScope.Other) {
+            if (!authoritative && pendingOtherPkg != pkg) {
+                pendingOtherPkg = pkg
+                return
+            }
+            pendingOtherPkg = null
+        } else {
+            // 正向信号（游戏/自家）即时生效，并清掉待确认的 Other
+            pendingOtherPkg = null
+        }
+        lastForegroundPackage = pkg
+        if (_scope.value != next) {
+            Log.d(
+                "ForegroundGameMonitor",
+                "scope=${next} pkg=$pkg authoritative=$authoritative pending=$pendingOtherPkg",
+            )
+            _scope.value = next
+        }
         val inGame = next == ForegroundScope.Game
         if (_gameForeground.value != inGame) _gameForeground.value = inGame
     }
 
-    /** 无障碍窗口事件直达 */
-    fun notifyForegroundPackage(pkg: String?) = update(pkg)
+    /** 无障碍窗口事件直达（非权威：正向信号即时，负向信号去抖） */
+    fun notifyForegroundPackage(pkg: String?) = update(pkg, authoritative = false)
 
-    /** 轮询兜底：把检测到的包名写回同一真源（关键修复：过去轮询不写包名） */
-    fun publishForegroundPackage(pkg: String?) = update(pkg)
+    /** UsageStats 轮询兜底（权威：同样走连续两次去抖） */
+    fun publishForegroundPackage(pkg: String?) = update(pkg, authoritative = true)
 
     // ---- 兼容旧调用：读真源派生 ----
     /** 游戏是否前台（供状态徽标 / 执行判定） */

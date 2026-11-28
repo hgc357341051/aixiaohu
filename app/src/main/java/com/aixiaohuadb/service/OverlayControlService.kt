@@ -45,7 +45,9 @@ import java.util.concurrent.atomic.AtomicBoolean
 /**
  * 统一悬浮控制中心：悬浮球（语音入口）+ 指令按钮 + 自定义宏按钮 + 游戏内调节面板 + 逐点录制备份。
  *
- * 显示规则：球全局显示（语音入口）；按钮仅在王者荣耀前台（或面板打开时预览）显示。
+ * 显示规则：悬浮球常驻（全局面板/语音入口，不随前台切换显隐，杜绝抖动）；
+ * 宏按钮仅在目标游戏前台（或面板打开预览）显示。球/按钮均以"幂等对齐"方式渲染，
+ * 目标态未变绝不触碰 WindowManager。
  * 执行：MACRO → MacroResolver（COMMAND 仅兼容反序列化，不执行）；全局 CAS 执行锁防连点；
  * 反馈用按钮自身闪色（绿成功 / 红失败）替代 Toast。
  */
@@ -56,7 +58,11 @@ class OverlayControlService : Service() {
 
     // 视图集合
     private var ballPair: Pair<TextView, WindowManager.LayoutParams>? = null
+    /** 上一次渲染的悬浮球样式签名；相同则跳过 applyStyle/updateViewLayout，杜绝高频重绘 */
+    private var ballStyleSig: String? = null
     private val buttonViews = mutableMapOf<String, Pair<TextView, WindowManager.LayoutParams>>()
+    /** 每个按钮上一次的样式签名 */
+    private val buttonStyleSigs = mutableMapOf<String, String>()
     private var panelHolder: OverlayViews.PanelHolder? = null
     private var panelParams: WindowManager.LayoutParams? = null
     /** 每次移除/重建面板自增，阻止旧 View.post 回调更新新面板或已移除的 View */
@@ -69,6 +75,9 @@ class OverlayControlService : Service() {
 
     @Volatile
     private var recordError: String = ""
+    /** 上次检测到的悬浮窗权限状态：用于检测运行中被撤销后重新授予 */
+    @Volatile
+    private var overlayPermissionGranted = true
     /** 每次启动递增：迟到的 onUpdate/onError 不得覆盖新一轮录制或命名窗 */
     private var recordingSession = 0
     private var namingView: View? = null
@@ -97,7 +106,8 @@ class OverlayControlService : Service() {
 
     override fun onCreate() {
         super.onCreate()
-        if (!Settings.canDrawOverlays(this)) {
+        overlayPermissionGranted = Settings.canDrawOverlays(this)
+        if (!overlayPermissionGranted) {
             stopSelf()
             return
         }
@@ -134,36 +144,56 @@ class OverlayControlService : Service() {
                 }
         }
 
-        // 前台兜底轮询：把检测到的包名写回单一真源（无障碍未开启时也能切换）。
-        // 关键修复：过去轮询只写 gameForeground 布尔、不写包名，导致 selfForeground 陈旧无法纠正。
+        // 前台兜底轮询 + 权限健康检测
         serviceScope?.launch {
             while (isActive) {
-                val pkg = detectForegroundPackage()
-                ForegroundGameMonitor.publishForegroundPackage(pkg)
+                // 权限在运行中被撤销/恢复：系统撤销时会移除所有 overlay，
+                // 必须同步清掉本地视图缓存，否则重新授予后 updateViewLayout 全失败、
+                // 悬浮件永远回不来（"显示后消失且不再恢复"的经典症状）。
+                val granted = Settings.canDrawOverlays(this@OverlayControlService)
+                if (granted != overlayPermissionGranted) {
+                    overlayPermissionGranted = granted
+                    if (granted) {
+                        Log.d("OverlayControl", "overlay permission restored, rebuild")
+                        reconcile()
+                    } else {
+                        Log.w("OverlayControl", "overlay permission revoked, detach views")
+                        detachAllOverlayViews()
+                    }
+                }
+                if (granted) {
+                    val pkg = detectForegroundPackage()
+                    ForegroundGameMonitor.publishForegroundPackage(pkg)
+                }
                 delay(500)
             }
         }
     }
 
-    /** 轮询检测当前前台包名：优先 UsageStats，失败回退无障碍已记录的包名 */
+    /**
+     * 轮询检测当前前台包名：只读 UsageStats 的 ACTIVITY_RESUMED。
+     *
+     * 关键修复：过去查不到事件时回退到 lastForegroundPackage（可能已过期），
+     * 10 秒后突然把 scope 覆盖成 Self/Other，是"球显示后又消失"的元凶之一。
+     * 现在查不到就返回 null，由 ForegroundGameMonitor.update 忽略，保持当前稳定态。
+     */
     private fun detectForegroundPackage(): String? {
-        val usage = com.aixiaohuadb.util.PermissionState.usageAccessGranted(applicationContext)
-        if (usage) {
-            val usm = getSystemService(Context.USAGE_STATS_SERVICE) as? android.app.usage.UsageStatsManager
-            val now = System.currentTimeMillis()
-            val result = runCatching {
-                val events = usm?.queryEvents(now - 10_000L, now)
-                var last: String? = null
-                val ev = android.app.usage.UsageEvents.Event()
-                while (events != null && events.hasNextEvent()) {
-                    events.getNextEvent(ev)
-                    if (ev.eventType == android.app.usage.UsageEvents.Event.ACTIVITY_RESUMED) last = ev.packageName
+        if (!com.aixiaohuadb.util.PermissionState.usageAccessGranted(applicationContext)) return null
+        val usm = getSystemService(Context.USAGE_STATS_SERVICE) as? android.app.usage.UsageStatsManager
+            ?: return null
+        val now = System.currentTimeMillis()
+        return runCatching {
+            val events = usm.queryEvents(now - 6_000L, now) ?: return@runCatching null
+            var last: String? = null
+            val ev = android.app.usage.UsageEvents.Event()
+            while (events.hasNextEvent()) {
+                events.getNextEvent(ev)
+                if (ev.eventType == android.app.usage.UsageEvents.Event.ACTIVITY_RESUMED) {
+                    last = ev.packageName
                 }
-                last
-            }.getOrNull()
-            if (result != null) return result
-        }
-        return ForegroundGameMonitor.lastForegroundPackage
+            }
+            last
+        }.getOrNull()
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
@@ -171,10 +201,41 @@ class OverlayControlService : Service() {
             ACTION_START_RECORD -> startRecording()
             ACTION_START_SMART_RECORD -> startRecordingSmart()
             ACTION_START_ADB_RECORD -> startAdbRecording()
+            ACTION_REFRESH -> refreshOverlay()
             MacroRecordNotification.ACTION_FINISH_RECORD -> finishAdbRecording()
             MacroRecordNotification.ACTION_CANCEL_RECORD -> cancelAdbRecording()
         }
-        return START_NOT_STICKY
+        // STICKY：进程被系统回收后自动重建服务，悬浮球恢复常驻；
+        // 无权限时 onCreate 会 stopSelf，不会无限重启。
+        return START_STICKY
+    }
+
+    /** 供权限页授权完成后主动触发：重新校验权限并立即对齐悬浮件 */
+    private fun refreshOverlay() {
+        val granted = Settings.canDrawOverlays(this)
+        overlayPermissionGranted = granted
+        if (granted) reconcile() else detachAllOverlayViews()
+    }
+
+    /**
+     * 权限失效时移除所有 overlay 并清空视图缓存，但不碰 widgets/ball 等配置。
+     * 权限恢复后 reconcile 会因缓存为空而重新 addView。
+     */
+    private fun detachAllOverlayViews() {
+        runCatching { ballPair?.first?.let { windowManager.removeView(it) } }
+        ballPair = null
+        ballStyleSig = null
+        buttonViews.values.forEach { (v, _) -> runCatching { windowManager.removeView(v) } }
+        buttonViews.clear()
+        buttonStyleSigs.clear()
+        listOfNotNull(panelHolder?.root, namingView, adbChipView, confirmView).forEach {
+            runCatching { windowManager.removeView(it) }
+        }
+        panelHolder = null
+        panelOpen = false
+        namingView = null
+        adbChipView = null
+        confirmView = null
     }
 
     override fun onDestroy() {
@@ -188,17 +249,7 @@ class OverlayControlService : Service() {
         serviceScope?.cancel()
         executing.set(false)
         panelGeneration++
-        listOfNotNull(ballPair?.first).forEach { runCatching { windowManager.removeView(it) } }
-        buttonViews.values.forEach { (v, _) -> runCatching { windowManager.removeView(v) } }
-        buttonViews.clear()
-        listOfNotNull(panelHolder?.root, namingView, adbChipView, confirmView).forEach {
-            runCatching { windowManager.removeView(it) }
-        }
-        ballPair = null
-        panelHolder = null
-        namingView = null
-        adbChipView = null
-        confirmView = null
+        detachAllOverlayViews()
         super.onDestroy()
     }
 
@@ -223,9 +274,10 @@ class OverlayControlService : Service() {
             return
         }
 
-        // ---- 悬浮球：自家 App 前台隐藏；其余场景显示（其它 App 折叠由样式层处理）----
-        val ballShown = ballCfg.visible && scope != ForegroundScope.Self
-        applyBall(ballShown)
+        // ---- 悬浮球：常驻显示。它是全局面板/语音入口，不随前台应用切换而 add/remove。
+        // 过去 scope==Self 就移除、离开再重建，玩家看到的就是"切进设置球没了、回来又冒出来"。
+        // 常驻后只有总开关关闭或权限失效才移除，显隐抖动从根上消失。----
+        applyBall(ballCfg.visible)
 
         // ---- 宏按钮：只在目标游戏前台显示；面板打开时也显示以便预览 ----
         // 修复过去常量短路导致"除自家 App 外到处显示"、非游戏场景误触的问题。
@@ -241,18 +293,28 @@ class OverlayControlService : Service() {
         buttonShown.forEach { w -> if (!buttonViews.containsKey(w.id)) addButton(w) }
     }
 
-    /** 幂等应用悬浮球：显示状态未变时只更新样式，不重复 add/remove */
+    /** 幂等应用悬浮球：样式/位置未变时完全不触碰 WindowManager */
     private fun applyBall(show: Boolean) {
         if (!show) { removeBall(); return }
+        val sig = "ball|$ballCfg|$controlMode|$voiceEnabled"
         if (ballPair == null) {
             addBall()
-        } else {
-            ballPair?.let { (view, params) ->
+            ballPair?.let { ballStyleSig = sig }
+            return
+        }
+        ballPair?.let { (view, params) ->
+            val styleChanged = ballStyleSig != sig
+            if (styleChanged) {
                 OverlayViews.applyBallStyle(this, view, params, ballCfg, controlMode, voiceEnabled)
-                val (screenW, screenH) = screenSize()
-                val (x, y) = OverlayGestures.clampPosition(
-                    params.x, params.y, params.width, params.height, screenW, screenH,
-                )
+                ballStyleSig = sig
+            }
+            // 位置：仅当 clamp 后确实变化（如屏幕旋转/尺寸变化）才 update，
+            // 拖动经过的 updateViewLayout 由手势自己完成，这里不再重复。
+            val (screenW, screenH) = screenSize()
+            val (x, y) = OverlayGestures.clampPosition(
+                params.x, params.y, params.width, params.height, screenW, screenH,
+            )
+            if (styleChanged || x != params.x || y != params.y) {
                 params.x = x; params.y = y
                 runCatching { windowManager.updateViewLayout(view, params) }
             }
@@ -270,12 +332,18 @@ class OverlayControlService : Service() {
         // addView 失败不能缓存为"已显示"：否则后续 updateViewLayout 全抛异常被吞，
         // 表现为悬浮球逻辑存在但物理不显示、点了没反应。
         val ok = runCatching { windowManager.addView(view, params) }.isSuccess
-        if (ok) ballPair = view to params else scheduleAddRetry { ballPair != null }
+        if (ok) {
+            ballPair = view to params
+            ballStyleSig = "ball|$ballCfg|$controlMode|$voiceEnabled"
+        } else {
+            scheduleAddRetry { ballPair != null }
+        }
     }
 
     private fun removeBall() {
         ballPair?.let { (v, _) -> runCatching { windowManager.removeView(v) } }
         ballPair = null
+        ballStyleSig = null
     }
 
     private fun addButton(w: OverlayWidget) {
@@ -287,7 +355,12 @@ class OverlayControlService : Service() {
         params.y = (w.fy * (screenH - params.height).coerceAtLeast(0)).toInt()
         bindButtonGestures(view, params, w.id)
         val ok = runCatching { windowManager.addView(view, params) }.isSuccess
-        if (ok) buttonViews[w.id] = view to params else scheduleAddRetry { buttonViews.containsKey(w.id) }
+        if (ok) {
+            buttonViews[w.id] = view to params
+            buttonStyleSigs[w.id] = buttonSig(w)
+        } else {
+            scheduleAddRetry { buttonViews.containsKey(w.id) }
+        }
     }
 
     /** addView 失败后的有限退避重试：检查目标悬浮件是否已成功挂载，成功则停止 */
@@ -302,20 +375,32 @@ class OverlayControlService : Service() {
         }
     }
 
+    /** 按钮外观签名：只有这些字段变化才需要重新 applyStyle + updateViewLayout */
+    private fun buttonSig(w: OverlayWidget): String =
+        "btn|${w.sizeDp}|${w.alphaPercent}|${w.label}|${w.locked}|${w.enabled}"
+
     private fun updateButton(w: OverlayWidget) {
         val pair = buttonViews[w.id] ?: return
-        OverlayViews.applyButtonStyle(this, pair.first, pair.second, w)
+        val sig = buttonSig(w)
+        val styleChanged = buttonStyleSigs[w.id] != sig
+        if (styleChanged) {
+            OverlayViews.applyButtonStyle(this, pair.first, pair.second, w)
+            buttonStyleSigs[w.id] = sig
+        }
         val (screenW, screenH) = screenSize()
         val (x, y) = OverlayGestures.clampPosition(
             pair.second.x, pair.second.y, pair.second.width, pair.second.height,
             screenW, screenH,
         )
-        pair.second.x = x; pair.second.y = y
-        runCatching { windowManager.updateViewLayout(pair.first, pair.second) }
+        if (styleChanged || x != pair.second.x || y != pair.second.y) {
+            pair.second.x = x; pair.second.y = y
+            runCatching { windowManager.updateViewLayout(pair.first, pair.second) }
+        }
     }
 
     private fun removeButton(id: String) {
         buttonViews.remove(id)?.let { (v, _) -> runCatching { windowManager.removeView(v) } }
+        buttonStyleSigs.remove(id)
     }
 
     private fun baseParams() = WindowManager.LayoutParams(
@@ -1105,10 +1190,18 @@ class OverlayControlService : Service() {
             runCatching { context.stopService(Intent(context, OverlayControlService::class.java)) }
         }
 
+        /** 权限页授权完成后调用：服务在跑则立即重建悬浮件，未跑则拉起 */
+        fun refresh(context: Context) {
+            if (!Settings.canDrawOverlays(context)) return
+            val intent = Intent(context, OverlayControlService::class.java).setAction(ACTION_REFRESH)
+            runCatching { context.startService(intent) }
+        }
+
         fun isPermissionGranted(context: Context): Boolean = Settings.canDrawOverlays(context)
 
         const val ACTION_START_RECORD = "com.aixiaohuadb.action.START_RECORD"
         const val ACTION_START_SMART_RECORD = "com.aixiaohuadb.action.START_SMART_RECORD"
         const val ACTION_START_ADB_RECORD = "com.aixiaohuadb.action.START_ADB_RECORD"
+        const val ACTION_REFRESH = "com.aixiaohuadb.action.REFRESH"
     }
 }

@@ -170,6 +170,17 @@ fun AppNavHost(
                     },
                 )
             }
+            // 从设置页进入的权限中心：授权后回到设置页并让悬浮服务重建，不重置引导栈
+            composable("permissions/settings") {
+                PermissionsScreen(
+                    onBack = { nav.popBackStack() },
+                    onGranted = {
+                        com.aixiaohuadb.service.OverlayControlService.refresh(context)
+                        nav.popBackStack()
+                    },
+                    onManualOnly = { nav.popBackStack() },
+                )
+            }
             composable("home/{state}") {
                 val homeMacros by overlayVm.macros.collectAsState()
                 HomeScreen(
@@ -241,6 +252,7 @@ fun AppNavHost(
                     onMapping = { nav.navigate("mapping") },
                     onAdb = { nav.navigate("adb") },
                     onOverlay = { nav.navigate("overlay") },
+                    onPermissions = { nav.navigate("permissions/settings") },
                     onDebug = { if (BuildConfig.DEBUG_PAGE_VISIBLE) nav.navigate("debug") },
                 )
             }
