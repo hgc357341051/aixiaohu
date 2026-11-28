@@ -1,10 +1,9 @@
 package com.aixiaohuadb.service
 
-import android.app.AppOpsManager
 import android.content.Context
 import android.app.usage.UsageEvents
 import android.app.usage.UsageStatsManager
-import android.os.Process
+import com.aixiaohuadb.util.PermissionState
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
@@ -56,18 +55,11 @@ object ForegroundGameMonitor {
         return isGameForegroundByUsageStats(context)
     }
 
-    fun hasUsageAccess(context: Context): Boolean = runCatching {
-        val appOps = context.getSystemService(Context.APP_OPS_SERVICE) as? AppOpsManager
-        appOps?.checkOpNoThrow(
-            AppOpsManager.OPSTR_GET_USAGE_STATS,
-            Process.myUid(),
-            context.packageName,
-        ) == AppOpsManager.MODE_ALLOWED
-    }.getOrDefault(false)
+    fun hasUsageAccess(context: Context): Boolean = PermissionState.usageAccessGranted(context)
 
-    /** 前台检测能力是否就绪（无障碍实时跟踪或使用情况访问二选一即可） */
+    /** 前台检测能力是否就绪（无障碍已开启或使用情况访问二选一即可） */
     fun hasForegroundTracking(context: Context): Boolean =
-        VoiceAccessibilityService.instance != null || hasUsageAccess(context)
+        PermissionState.accessibilityEnabled(context) || hasUsageAccess(context)
 
     private fun isGameForegroundByUsageStats(context: Context): Boolean {
         if (!hasUsageAccess(context)) return false

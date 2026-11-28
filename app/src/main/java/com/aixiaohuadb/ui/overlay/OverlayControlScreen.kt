@@ -24,6 +24,7 @@ import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Slider
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
+import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
@@ -35,11 +36,12 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalLifecycleOwner
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
+import androidx.lifecycle.Lifecycle
+import androidx.lifecycle.LifecycleEventObserver
 import com.aixiaohuadb.service.ControlMode
-import com.aixiaohuadb.service.ForegroundGameMonitor
-import com.aixiaohuadb.service.OverlayControlService
 import com.aixiaohuadb.service.OverlayWidget
 import com.aixiaohuadb.service.OverlayWidget.Companion.MAX_ALPHA
 import com.aixiaohuadb.service.OverlayWidget.Companion.MAX_SIZE_DP
@@ -57,6 +59,7 @@ import com.aixiaohuadb.ui.common.Segment
 import com.aixiaohuadb.ui.common.ToggleRow
 import com.aixiaohuadb.ui.common.WarningCard
 import com.aixiaohuadb.ui.theme.Brand
+import com.aixiaohuadb.util.PermissionState
 import com.aixiaohuadb.ui.theme.Danger
 import com.aixiaohuadb.ui.theme.Muted
 import com.aixiaohuadb.ui.theme.Spacing
@@ -73,13 +76,24 @@ fun OverlayControlScreen(
     onTab: (String) -> Unit,
 ) {
     val context = LocalContext.current
+    val lifecycleOwner = LocalLifecycleOwner.current
+    var permissionRevision by remember { mutableIntStateOf(0) }
+    // 从系统设置授予权限返回前台后刷新，避免 remember 缓存导致状态陈旧
+    DisposableEffect(lifecycleOwner) {
+        val observer = LifecycleEventObserver { _, event ->
+            if (event == Lifecycle.Event.ON_RESUME) permissionRevision++
+        }
+        lifecycleOwner.lifecycle.addObserver(observer)
+        onDispose { lifecycleOwner.lifecycle.removeObserver(observer) }
+    }
+    permissionRevision
     val widgets by vm.widgets.collectAsState()
     val ball by vm.ball.collectAsState()
     val macros by vm.macros.collectAsState()
     val pendingMacro by vm.pendingMacro.collectAsState()
     val controlMode by vm.controlMode.collectAsState()
-    val granted = remember { OverlayControlService.isPermissionGranted(context) }
-    val trackingReady = remember { ForegroundGameMonitor.hasForegroundTracking(context) }
+    val granted = PermissionState.overlayGranted(context)
+    val trackingReady = PermissionState.accessibilityEnabled(context) || PermissionState.usageAccessGranted(context)
 
     val voiceEnabled by vm.voiceEnabled.collectAsState()
     val bindings by vm.bindings.collectAsState()

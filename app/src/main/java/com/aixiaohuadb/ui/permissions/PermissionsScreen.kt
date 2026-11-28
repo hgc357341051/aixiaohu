@@ -1,14 +1,13 @@
 package com.aixiaohuadb.ui.permissions
 
 import android.Manifest
-import android.content.Context
 import android.content.Intent
-import android.content.pm.PackageManager
-import android.net.Uri
-import android.provider.Settings
+import android.os.Build
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
+import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
@@ -17,16 +16,20 @@ import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.AccessibilityNew
+import androidx.compose.material.icons.filled.BatterySaver
 import androidx.compose.material.icons.filled.CheckCircle
 import androidx.compose.material.icons.filled.Layers
 import androidx.compose.material.icons.filled.Mic
 import androidx.compose.material.icons.filled.Notifications
+import androidx.compose.material.icons.filled.QueryStats
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.remember
@@ -35,11 +38,12 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalLifecycleOwner
 import androidx.compose.ui.unit.dp
-import androidx.core.content.ContextCompat
-import com.aixiaohuadb.service.VoiceAccessibilityService
-import com.aixiaohuadb.ui.common.IconCircle
+import androidx.lifecycle.Lifecycle
+import androidx.lifecycle.LifecycleEventObserver
 import com.aixiaohuadb.ui.common.InfoCard
+import com.aixiaohuadb.ui.common.OpsSectionLabel
 import com.aixiaohuadb.ui.common.PrimaryButton
 import com.aixiaohuadb.ui.common.ScreenFrame
 import com.aixiaohuadb.ui.common.SecondaryButton
@@ -47,10 +51,25 @@ import com.aixiaohuadb.ui.common.StatusBadge
 import com.aixiaohuadb.ui.common.Tone
 import com.aixiaohuadb.ui.common.WarningCard
 import com.aixiaohuadb.ui.theme.Brand
-import com.aixiaohuadb.ui.theme.BrandSoft
+import com.aixiaohuadb.ui.theme.Ink
+import com.aixiaohuadb.ui.theme.Line
 import com.aixiaohuadb.ui.theme.Muted
+import com.aixiaohuadb.ui.theme.Ok
+import com.aixiaohuadb.ui.theme.OkBg
 import com.aixiaohuadb.ui.theme.Spacing
+import com.aixiaohuadb.ui.theme.Warn
+import com.aixiaohuadb.ui.theme.WarnBg
+import com.aixiaohuadb.util.PermissionState
 
+/**
+ * GAME OPS 权限中心：六项权限集中呈现，状态取自 [PermissionState] 单一真源。
+ *
+ * 分两组：
+ * - 核心链路（悬浮窗 / 无障碍 / 后台运行）—— 不授予则悬浮控制与长连接不可用；
+ * - 增强能力（麦克风 / 通知 / 使用情况）—— 语音与前台兜底，可按需授予。
+ *
+ * 返回前台自动刷新状态：系统设置页授予后回到本页即时更新，无需手动重启。
+ */
 @Composable
 fun PermissionsScreen(
     onBack: () -> Unit,
@@ -58,98 +77,163 @@ fun PermissionsScreen(
     onManualOnly: () -> Unit,
 ) {
     val context = LocalContext.current
+    val lifecycleOwner = LocalLifecycleOwner.current
     var revision by remember { mutableIntStateOf(0) }
-    val launcher = rememberLauncherForActivityResult(
+
+    val runtimeLauncher = rememberLauncherForActivityResult(
         ActivityResultContracts.RequestMultiplePermissions(),
     ) { revision++ }
 
-    val micGranted = ContextCompat.checkSelfPermission(context, Manifest.permission.RECORD_AUDIO) ==
-        PackageManager.PERMISSION_GRANTED
-    val notifGranted = if (android.os.Build.VERSION.SDK_INT >= 33) {
-        ContextCompat.checkSelfPermission(context, Manifest.permission.POST_NOTIFICATIONS) ==
-            PackageManager.PERMISSION_GRANTED
-    } else true
-    val a11yGranted = VoiceAccessibilityService.instance != null
-    val overlayGranted = Settings.canDrawOverlays(context)
-    revision // 读取以触发重组
+    // 从系统设置返回前台时刷新所有权限状态
+    DisposableEffect(lifecycleOwner) {
+        val observer = LifecycleEventObserver { _, event ->
+            if (event == Lifecycle.Event.ON_RESUME) revision++
+        }
+        lifecycleOwner.lifecycle.addObserver(observer)
+        onDispose { lifecycleOwner.lifecycle.removeObserver(observer) }
+    }
+
+    // 读取 revision 触发重组
+    revision
+    val overlay = PermissionState.overlayGranted(context)
+    val a11y = PermissionState.accessibilityEnabled(context)
+    val battery = PermissionState.batteryOptimizationIgnored(context)
+    val mic = PermissionState.micGranted(context)
+    val notif = PermissionState.notificationGranted(context)
+    val usage = PermissionState.usageAccessGranted(context)
+
+    val core = listOf(overlay, a11y, battery)
+    val enhanced = listOf(mic, notif, usage)
+    val grantedCount = core.count { it } + enhanced.count { it }
+    val total = core.size + enhanced.size
 
     ScreenFrame(
-        title = "权限申请",
-        subtitle = "按需申请 · 可随时撤回",
+        title = "权限中心",
+        subtitle = "LINK ACCESS · 逐项授权，可随时撤回",
         showBack = true,
         onBack = onBack,
         activeTab = "",
     ) {
+        // 概览
+        PermissionOverview(granted = grantedCount, total = total)
+
         InfoCard {
             Text(
-                "权限只在对应模式下使用，可随时到系统设置撤回。拒绝后自动降级到手动 / 无语音面板。",
+                "核心权限决定悬浮控制与后台链路能否工作；增强权限仅在对应模式下启用。" +
+                    "逐项点击开启后返回本页，状态会自动刷新。",
                 style = MaterialTheme.typography.bodySmall,
                 color = Muted,
             )
         }
-        InfoCard {
-            PermissionLine(
-                icon = Icons.Filled.Mic,
-                title = "麦克风",
-                desc = "语音唤醒与指令采集，端侧处理",
-                granted = micGranted,
-            ) {
-                launcher.launch(
-                    if (android.os.Build.VERSION.SDK_INT >= 33) {
+
+        OpsSectionLabel(title = "核心链路 · 必配", trailing = "${core.count { it }}/${core.size}")
+
+        PermissionLine(
+            icon = Icons.Filled.Layers,
+            title = "悬浮窗",
+            desc = "显示悬浮球与宏指令按钮；不授予则无法在游戏上操作",
+            granted = overlay,
+            onClick = { openSafely(context, PermissionState.overlaySettingsIntent(context)) },
+        )
+        PermissionLine(
+            icon = Icons.Filled.AccessibilityNew,
+            title = "无障碍服务",
+            desc = "手势转发与前台跟踪；宏回放的备用执行链路",
+            granted = a11y,
+            onClick = { openSafely(context, PermissionState.accessibilitySettingsIntent()) },
+        )
+        PermissionLine(
+            icon = Icons.Filled.BatterySaver,
+            title = "后台运行（电池优化白名单）",
+            desc = "避免系统休眠切断 ADB 长连接与常驻通知",
+            granted = battery,
+            onClick = { openSafely(context, PermissionState.batteryOptimizationIntent(context)) },
+        )
+
+        Spacer(Modifier.height(Spacing.sm))
+        OpsSectionLabel(title = "增强能力 · 按需", trailing = "${enhanced.count { it }}/${enhanced.size}")
+
+        PermissionLine(
+            icon = Icons.Filled.Mic,
+            title = "麦克风",
+            desc = "语音唤醒与指令采集，端侧处理不上传",
+            granted = mic,
+            onClick = {
+                runtimeLauncher.launch(
+                    if (Build.VERSION.SDK_INT >= 33) {
                         arrayOf(Manifest.permission.RECORD_AUDIO, Manifest.permission.POST_NOTIFICATIONS)
                     } else {
                         arrayOf(Manifest.permission.RECORD_AUDIO)
                     },
                 )
-            }
-            PermissionLine(
-                icon = Icons.Filled.AccessibilityNew,
-                title = "无障碍服务",
-                desc = "执行换装点击（备用链路）",
-                granted = a11yGranted,
-            ) {
-                runCatching { context.startActivity(Intent(Settings.ACTION_ACCESSIBILITY_SETTINGS)) }
-            }
-            PermissionLine(
-                icon = Icons.Filled.Layers,
-                title = "悬浮窗",
-                desc = "悬浮球与状态提示，不遮挡 HUD",
-                granted = overlayGranted,
-            ) {
-                val intent = Intent(
-                    Settings.ACTION_MANAGE_OVERLAY_PERMISSION,
-                    Uri.parse("package:" + context.packageName),
-                )
-                runCatching { context.startActivity(intent) }
-            }
-            PermissionLine(
-                icon = Icons.Filled.Notifications,
-                title = "通知 / 前台服务",
-                desc = "常驻唤醒与状态通知",
-                granted = notifGranted,
-            ) {
-                if (android.os.Build.VERSION.SDK_INT >= 33) {
-                    launcher.launch(arrayOf(Manifest.permission.POST_NOTIFICATIONS))
+            },
+        )
+        PermissionLine(
+            icon = Icons.Filled.Notifications,
+            title = "通知 / 前台服务",
+            desc = "常驻状态通知，保持后台链路可见",
+            granted = notif,
+            onClick = {
+                if (Build.VERSION.SDK_INT >= 33) {
+                    runtimeLauncher.launch(arrayOf(Manifest.permission.POST_NOTIFICATIONS))
                 } else {
-                    openAppDetails(context)
+                    openSafely(context, PermissionState.appDetailsIntent(context))
                 }
-            }
+            },
+        )
+        PermissionLine(
+            icon = Icons.Filled.QueryStats,
+            title = "使用情况访问",
+            desc = "前台游戏检测的兜底通道；无障碍已开启时可不授",
+            granted = usage,
+            onClick = { openSafely(context, PermissionState.usageAccessSettingsIntent()) },
+        )
+
+        Spacer(Modifier.height(Spacing.md))
+        if (!overlay || !a11y) {
+            WarningCard("悬浮窗或无障碍未授予时，悬浮球与宏指令按钮无法工作；仍可进入主界面手动查看。")
+            Spacer(Modifier.height(Spacing.sm))
         }
-        PrimaryButton("全部允许并进入主界面", onClick = {
-            if (micGranted) onGranted() else {
-                launcher.launch(
-                    if (android.os.Build.VERSION.SDK_INT >= 33) {
-                        arrayOf(Manifest.permission.RECORD_AUDIO, Manifest.permission.POST_NOTIFICATIONS)
-                    } else {
-                        arrayOf(Manifest.permission.RECORD_AUDIO)
-                    },
-                )
-            }
-        })
+        PrimaryButton("进入主界面", onClick = onGranted)
         Spacer(Modifier.height(Spacing.sm))
         SecondaryButton(text = "仅手动模式进入", onClick = onManualOnly)
-        Spacer(Modifier.height(Spacing.md))
-        WarningCard("拒绝麦克风后自动进入手动模式；拒绝无障碍后只走内嵌 ADB / 只读提示链路，不影响面板直选。")
+    }
+}
+
+@Composable
+private fun PermissionOverview(granted: Int, total: Int) {
+    val ratio = if (total == 0) 0f else granted.toFloat() / total.toFloat()
+    InfoCard {
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            Column(Modifier.weight(1f)) {
+                Text("权限就绪度", style = MaterialTheme.typography.titleSmall, color = Ink)
+                Spacer(Modifier.height(2.dp))
+                Text(
+                    "$granted / $total 项已授予",
+                    style = MaterialTheme.typography.labelSmall,
+                    color = if (granted == total) Ok else Warn,
+                )
+            }
+            StatusBadge(
+                text = if (granted == total) "全部就绪" else "待配置",
+                tone = if (granted == total) Tone.OK else Tone.WARN,
+                icon = if (granted == total) Icons.Filled.CheckCircle else null,
+            )
+        }
+        Spacer(Modifier.height(Spacing.sm))
+        Box(
+            modifier = Modifier
+                .fillMaxWidth()
+                .height(6.dp)
+                .background(Line, RoundedCornerShape(3.dp)),
+        ) {
+            Box(
+                modifier = Modifier
+                    .fillMaxWidth(ratio)
+                    .height(6.dp)
+                    .background(if (granted == total) Ok else Brand, RoundedCornerShape(3.dp)),
+            )
+        }
     }
 }
 
@@ -164,33 +248,37 @@ private fun PermissionLine(
     Row(
         modifier = Modifier
             .fillMaxWidth()
-            .padding(vertical = Spacing.sm)
-            .clickable { onClick() },
+            .clickable { onClick() }
+            .padding(vertical = Spacing.sm),
         verticalAlignment = Alignment.CenterVertically,
     ) {
-        IconCircle(
-            icon = icon,
-            tint = if (granted) com.aixiaohuadb.ui.theme.Ok else Brand,
-            container = if (granted) com.aixiaohuadb.ui.theme.OkBg else BrandSoft,
-            size = 38.dp,
-        )
+        Box(
+            modifier = Modifier
+                .size(38.dp)
+                .background(if (granted) OkBg else WarnBg, RoundedCornerShape(10.dp)),
+            contentAlignment = Alignment.Center,
+        ) {
+            Icon(
+                icon,
+                contentDescription = title,
+                tint = if (granted) Ok else Warn,
+                modifier = Modifier.size(20.dp),
+            )
+        }
         Spacer(Modifier.width(Spacing.md))
         Column(Modifier.weight(1f)) {
-            Text(title, style = MaterialTheme.typography.bodySmall)
+            Text(title, style = MaterialTheme.typography.bodySmall, color = Ink)
             Text(desc, style = MaterialTheme.typography.labelSmall, color = Muted)
         }
         Spacer(Modifier.width(Spacing.sm))
         StatusBadge(
-            text = if (granted) "已授予" else "待申请",
+            text = if (granted) "已授予" else "去开启",
             tone = if (granted) Tone.OK else Tone.WARN,
             icon = if (granted) Icons.Filled.CheckCircle else null,
         )
     }
 }
 
-private fun openAppDetails(context: Context) {
-    val intent = Intent(Settings.ACTION_APPLICATION_DETAILS_SETTINGS).apply {
-        data = Uri.parse("package:" + context.packageName)
-    }
+private fun openSafely(context: android.content.Context, intent: Intent) {
     runCatching { context.startActivity(intent) }
 }

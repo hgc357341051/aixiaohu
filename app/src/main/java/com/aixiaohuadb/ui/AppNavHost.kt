@@ -82,7 +82,11 @@ fun AppNavHost(
         Box(Modifier.fillMaxSize().background(Bg))
         return
     }
-    val startDestination = if (onboardingDone == true) "home/disabled" else "onboarding"
+    // 关键：startDestination 只在首次读取后锁定一次。
+    // 若在引导中写标记后让它随 onboardingDone 变化，NavHost 会被重建、导航栈重置，
+    // 导致「下一步 → 权限说明」被直接弹到主页。用 remember 固化首帧决定。
+    val lockedStart by remember { mutableStateOf(if (onboardingDone == true) "home/disabled" else "onboarding") }
+    val startDestination = lockedStart
 
     // 面板 / 映射 / 悬浮设置共用同一 ViewModel，避免 OverlayStore 多实例观察不一致。
     val overlayVm: OverlayControlViewModel = viewModel(
