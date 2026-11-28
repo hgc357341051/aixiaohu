@@ -3,6 +3,7 @@ package com.aixiaohuadb.service
 import android.content.Context
 import androidx.datastore.core.DataStore
 import androidx.datastore.preferences.core.Preferences
+import androidx.datastore.preferences.core.booleanPreferencesKey
 import androidx.datastore.preferences.core.edit
 import androidx.datastore.preferences.core.stringPreferencesKey
 import androidx.datastore.preferences.preferencesDataStore
@@ -35,6 +36,7 @@ object OverlayStore {
     private val KEY_LEGACY = stringPreferencesKey("buttons_json")
     private val KEY_MODE_V1 = stringPreferencesKey("control_mode_v1")
     private val KEY_MODE_V2 = stringPreferencesKey("control_mode_v2")
+    private val KEY_OVERLAY_ENABLED = booleanPreferencesKey("overlay_enabled_v1")
 
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
     private val writeMutex = Mutex()
@@ -56,6 +58,13 @@ object OverlayStore {
     /** 控制模式：默认 ACCESSIBILITY（手动、非语音）；旧 MANUAL 数据由 fromKey 迁移 */
     private val _controlMode = MutableStateFlow(ControlMode.DEFAULT)
     val controlMode: StateFlow<ControlMode> = _controlMode.asStateFlow()
+
+    /**
+     * 悬浮窗总开关：关闭时移除全部悬浮球/宏按钮，并阻止保存宏等路径偷偷把服务拉起。
+     * 录制层由无障碍服务独立持有，不受此开关影响。
+     */
+    private val _overlayEnabled = MutableStateFlow(true)
+    val overlayEnabled: StateFlow<Boolean> = _overlayEnabled.asStateFlow()
 
     /**
      * 模式变更副作用钩子：由 App 注入 container.applyControlMode。
@@ -102,6 +111,7 @@ object OverlayStore {
             // control_mode_v2 优先；旧 control_mode_v1 经 fromKey 迁移（MANUAL → ACCESSIBILITY）。
             val restored = ControlMode.fromKey(prefs[KEY_MODE_V2] ?: prefs[KEY_MODE_V1])
             _controlMode.value = restored
+            _overlayEnabled.value = prefs[KEY_OVERLAY_ENABLED] ?: true
             // 任意模式恢复只收敛内存状态；fromRestore=true 保证冷启动不启动服务/语音
             notifyModeApplied(restored, true)
         }
@@ -130,6 +140,19 @@ object OverlayStore {
     /** 通知当前模式已被真实应用；冷启动恢复与 UI 切换共用同一副作用通道 */
     private fun notifyModeApplied(mode: ControlMode, fromRestore: Boolean = false) {
         modeApplier?.invoke(mode, fromRestore)
+    }
+
+    // ---------------- overlay 总开关 ----------------
+
+    /** 由宏库/悬浮设置调用：立即停/起悬浮服务并落盘，重开后由服务重新渲染全部悬浮件。 */
+    fun setOverlayEnabled(enabled: Boolean) {
+        if (_overlayEnabled.value == enabled) return
+        _overlayEnabled.value = enabled
+        schedulePersist()
+        val context = appContext ?: return
+        runCatching {
+            if (enabled) OverlayControlService.start(context) else OverlayControlService.stop(context)
+        }
     }
 
     // ---------------- widgets ----------------
@@ -258,6 +281,8 @@ object OverlayStore {
 
     /** 创建/保存后服务未运行时自动拉起（仅前台调用方触发，满足 Android 12+ 限制） */
     fun ensureServicesRunning() {
+        // 用户主动关闭悬浮窗后，保存宏/创建按钮不得把悬浮层偷偷拉回来
+        if (!_overlayEnabled.value) return
         val context = appContext ?: return
         // 系统拒绝后台启动服务时不能带崩保存宏/创建按钮的整条 UI 流程
         runCatching { OverlayControlService.start(context) }
@@ -302,6 +327,7 @@ object OverlayStore {
                     it[KEY_MODE_V2] = modeKey
                     // 旧键同步回写，回退老版本时不至于丢失模式选择
                     it[KEY_MODE_V1] = modeKey
+                    it[KEY_OVERLAY_ENABLED] = _overlayEnabled.value
                 }
             }
         }

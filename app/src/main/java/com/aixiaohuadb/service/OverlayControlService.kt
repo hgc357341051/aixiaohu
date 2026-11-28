@@ -81,15 +81,17 @@ class OverlayControlService : Service() {
     private var gameVisible = false
     private var controlMode = ControlMode.DEFAULT
     private var voiceEnabled = false
+    private var overlayEnabled = true
     private var panelOpen = false
     private var selectedTargetId: String? = null
 
-    private data class Quad(
+    private data class OverlayState(
         val widgets: List<OverlayWidget>,
         val ball: BallConfig,
         val game: Boolean,
         val mode: ControlMode,
         val voiceEnabled: Boolean,
+        val overlayEnabled: Boolean,
     )
 
     override fun onCreate() {
@@ -108,13 +110,19 @@ class OverlayControlService : Service() {
                 ForegroundGameMonitor.gameForeground,
                 OverlayStore.controlMode,
                 (application as App).container.voiceLifecycle.voiceEnabled,
-            ) { w, b, g, m, v -> Quad(w, b, g, m, v) }.collect { (w, b, g, m, v) ->
-                widgets = w
-                ballCfg = b
-                gameVisible = g
-                voiceEnabled = v
-                val modeChanged = controlMode != m
-                controlMode = m
+            ) { w, b, g, m, v -> OverlayState(w, b, g, m, v, true) }
+                // combine 原生重载最多 5 路；总开关单独再串一层，保持类型安全
+                .combine(OverlayStore.overlayEnabled) { state, enabled ->
+                    state.copy(overlayEnabled = enabled)
+                }
+                .collect { state ->
+                widgets = state.widgets
+                ballCfg = state.ball
+                gameVisible = state.game
+                voiceEnabled = state.voiceEnabled
+                overlayEnabled = state.overlayEnabled
+                val modeChanged = controlMode != state.mode
+                controlMode = state.mode
                 reconcile()
                 // 模式变化且面板打开时重建面板，实时反映状态/模式徽标
                 if (modeChanged && panelOpen) buildPanel()
@@ -137,6 +145,7 @@ class OverlayControlService : Service() {
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
         when (intent?.action) {
             ACTION_START_RECORD -> startRecording()
+            ACTION_START_ADB_RECORD -> startAdbRecording()
             MacroRecordNotification.ACTION_FINISH_RECORD -> finishAdbRecording()
             MacroRecordNotification.ACTION_CANCEL_RECORD -> cancelAdbRecording()
         }
@@ -173,6 +182,18 @@ class OverlayControlService : Service() {
     // ---------------- 统一渲染 ----------------
 
     private fun reconcile() {
+        // 总开关关闭：立即清空所有悬浮件，且不再因为游戏可见/面板打开而重建。
+        // 服务 stop 失败时这段也能保证屏幕上不残留悬浮球与宏按钮。
+        if (!overlayEnabled) {
+            removeBall()
+            buttonViews.keys.toList().forEach(::removeButton)
+            if (panelOpen) {
+                panelOpen = false
+                removePanelView()
+            }
+            return
+        }
+
         // 自家 App 在前台时，悬浮球/按钮必须全部隐藏：
         // 否则会压住 App 内的编辑器输入框和步骤行，点击也会被悬浮窗拦截。
         val selfForeground = ForegroundGameMonitor.lastForegroundPackage == packageName
@@ -664,9 +685,8 @@ class OverlayControlService : Service() {
     /**
      * 默认录制：无障碍覆盖层接管触摸，抬手时把同一手势转发给游戏。
      *
-     * 不再以 ADB getevent 为主路径：被动监听要求 Type B（ABS_MT_SLOT/TRACKING_ID），
-     * 大量模拟器与旧设备是 Type A，只会得到"被动录制不可用"，而截图标注并不能算录制。
-     * 这条路径不关心触摸协议，也不依赖 ADB 连接。
+     * 不再以 ADB getevent 为主路径：那条路依赖 ADB 连接，且 Type A 只能按帧近似配对触点。
+     * 默认路径不关心触摸协议，也不依赖 ADB 连接；ADB 高保真录制作为链路页的显式增强入口。
      */
     private fun startRecording() {
         // 上一次录制若停在异常状态（窗口被系统移除但对象还在），先彻底清理再重建，
@@ -719,7 +739,8 @@ class OverlayControlService : Service() {
 
     /**
      * ADB 增强录制：getevent 被动监听，保留内核时间戳与原生多指。
-     * 仅在设备支持 Type B 且用户明确选择时使用；失败只提示，不再伪装成"改用截图标注"。
+     * 仅在 ADB 已连接且用户从链路页显式选择时使用；Type A 也能按帧录制，Type B 多指语义更可靠。
+     * 失败只提示，不再伪装成"改用截图标注"。
      */
     private fun startAdbRecording() {
         val client: AdbClient = (application as App).container.adbClient
@@ -965,6 +986,17 @@ class OverlayControlService : Service() {
             runCatching { context.startService(intent) }
         }
 
+        /** 从链路页发起 ADB 高保真录制；服务会检查连接状态并显示录制胶囊。 */
+        fun startAdbRecording(context: Context) {
+            if (!Settings.canDrawOverlays(context)) {
+                Toast.makeText(context, "请先授予悬浮窗权限", Toast.LENGTH_SHORT).show()
+                return
+            }
+            val intent = Intent(context, OverlayControlService::class.java)
+                .setAction(ACTION_START_ADB_RECORD)
+            runCatching { context.startService(intent) }
+        }
+
         fun stop(context: Context) {
             runCatching { context.stopService(Intent(context, OverlayControlService::class.java)) }
         }
@@ -972,5 +1004,6 @@ class OverlayControlService : Service() {
         fun isPermissionGranted(context: Context): Boolean = Settings.canDrawOverlays(context)
 
         const val ACTION_START_RECORD = "com.aixiaohuadb.action.START_RECORD"
+        const val ACTION_START_ADB_RECORD = "com.aixiaohuadb.action.START_ADB_RECORD"
     }
 }

@@ -1,12 +1,18 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
-    <style name="Theme.VoiceCtl" parent="android:Theme.Material.Light.NoActionBar">
+    <!-- GAME OPS 深色窗口：parent 从 Material.Light 切到 Material（深色），
+         保证对话框 / 输入法 / 菜单等系统 UI 与 Compose 深色画面同一套视觉。
+         状态栏/导航栏用深空底而非 brand，避免顶部出现亮色条。 -->
+    <style name="Theme.VoiceCtl" parent="android:Theme.Material.NoActionBar">
         <item name="android:windowBackground">@color/bg</item>
-        <item name="android:statusBarColor">@color/brand</item>
-        <item name="android:navigationBarColor">@color/surface</item>
+        <item name="android:statusBarColor">@color/bg</item>
+        <item name="android:navigationBarColor">@color/bg</item>
         <item name="android:windowLightStatusBar">false</item>
-        <item name="android:windowLightNavigationBar">true</item>
+        <item name="android:windowLightNavigationBar">false</item>
+        <item name="android:windowDrawsSystemBarBackgrounds">true</item>
     </style>
+    <!-- 透明跳板保持 Light parent：它是无 UI 的中转 Activity，
+         深色 parent 会让部分 ROM 在闪现时画出黑底。 -->
     <style name="Theme.TransparentTrampoline" parent="android:Theme.Material.Light.NoActionBar">
         <item name="android:windowIsTranslucent">true</item>
         <item name="android:windowNoTitle">true</item>

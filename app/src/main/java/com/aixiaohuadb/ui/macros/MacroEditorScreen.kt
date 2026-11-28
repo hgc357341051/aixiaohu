@@ -1,6 +1,7 @@
 package com.aixiaohuadb.ui.macros
 
 import androidx.compose.foundation.BorderStroke
+import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Box
@@ -19,10 +20,15 @@ import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.filled.Delete
+import androidx.compose.material.icons.filled.Directions
 import androidx.compose.material.icons.filled.KeyboardArrowDown
 import androidx.compose.material.icons.filled.KeyboardArrowUp
 import androidx.compose.material.icons.filled.PlayArrow
+import androidx.compose.material.icons.filled.Schedule
 import androidx.compose.material.icons.filled.SearchOff
+import androidx.compose.material.icons.filled.TouchApp
+import androidx.compose.material3.Button
+import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
@@ -41,48 +47,55 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.clip
+import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.Path
+import androidx.compose.ui.graphics.PathEffect
+import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.graphics.vector.ImageVector
+import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.sp
 import com.aixiaohuadb.domain.macro.MacroAdapter
 import com.aixiaohuadb.domain.macro.MacroStep
 import com.aixiaohuadb.exec.ExecStep
 import com.aixiaohuadb.service.MacroConfig
 import com.aixiaohuadb.ui.common.ConfirmDialog
-import com.aixiaohuadb.ui.common.DangerButton
 import com.aixiaohuadb.ui.common.IconCircle
-import com.aixiaohuadb.ui.common.PillChip
+import com.aixiaohuadb.ui.common.OpsSectionLabel
 import com.aixiaohuadb.ui.common.PrimaryButton
-import com.aixiaohuadb.ui.common.SecondaryButton
-import com.aixiaohuadb.ui.common.SectionTitle
+import com.aixiaohuadb.ui.common.StatusBadge
+import com.aixiaohuadb.ui.common.Tone
 import com.aixiaohuadb.ui.theme.Brand
 import com.aixiaohuadb.ui.theme.BrandSoft
 import com.aixiaohuadb.ui.theme.BrandStrong
+import com.aixiaohuadb.ui.theme.ButtonShape
 import com.aixiaohuadb.ui.theme.CardShape
 import com.aixiaohuadb.ui.theme.Danger
 import com.aixiaohuadb.ui.theme.DangerBg
 import com.aixiaohuadb.ui.theme.FieldShape
-import com.aixiaohuadb.ui.theme.Info
-import com.aixiaohuadb.ui.theme.InfoBg
-import com.aixiaohuadb.ui.theme.Ink2
+import com.aixiaohuadb.ui.theme.Ink
 import com.aixiaohuadb.ui.theme.Line
 import com.aixiaohuadb.ui.theme.LineStrong
 import com.aixiaohuadb.ui.theme.Muted
+import com.aixiaohuadb.ui.theme.OnBrand
+import com.aixiaohuadb.ui.theme.Panel
+import com.aixiaohuadb.ui.theme.PanelFaint
+import com.aixiaohuadb.ui.theme.SmShape
 import com.aixiaohuadb.ui.theme.Spacing
 import com.aixiaohuadb.ui.theme.Surface2
+import com.aixiaohuadb.ui.theme.Violet
+import com.aixiaohuadb.ui.theme.VioletBg
 import com.aixiaohuadb.ui.theme.Warn
 import com.aixiaohuadb.ui.theme.WarnBg
 import kotlin.math.roundToInt
 
 /**
- * 宏编辑器：步骤增删排序 + 单步时长调节。
- *
- * 步骤状态用 [MacroAdapter.fromExecSteps] 从 [MacroConfig.steps] 转入，`remember(macroId)` 持有，
- * 保存时再 [MacroAdapter.toExecSteps] 转回执行链；页面本身不读写 OverlayStore。
- * 步骤列表需要 LazyColumn + 固定底部操作条，ScreenFrame 的 verticalScroll 内容区放不下，
- * 所以本页自带顶部栏/页脚，不渲染底部页签；[onTab] 仅与既有页面签名保持一致。
+ * 宏工作台：坐标预览与步骤时间轴同屏。
+ * 状态流与旧版一致（MacroAdapter 转入/转出），只重写视觉与交互层级。
  */
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -100,7 +113,6 @@ fun MacroEditorScreen(
     }
     val source = macro
 
-    // 已保存基线：用于判断"未保存改动"，保存成功后同步一次，避免调用方原地停留时误提示
     var savedName by remember(source.macroId) { mutableStateOf(source.name) }
     var savedSteps by remember(source.macroId) { mutableStateOf(MacroAdapter.fromExecSteps(source.steps)) }
     val steps = remember(source.macroId) {
@@ -114,30 +126,30 @@ fun MacroEditorScreen(
     val dirty = name != savedName || steps.toList() != savedSteps
     val totalMs = steps.sumOf { macroStepDurationMs(it) }
 
-    Column(
-        modifier = Modifier
-            .fillMaxSize()
-            .background(MaterialTheme.colorScheme.background),
-    ) {
+    Column(modifier = Modifier.fillMaxSize().background(MaterialTheme.colorScheme.background)) {
         TopAppBar(
             title = {
                 Column {
-                    Text("编辑宏", style = MaterialTheme.typography.titleMedium)
                     Text(
-                        if (dirty) "有未保存的改动" else "${steps.size} 步 · 约 ${formatMacroDuration(totalMs)}",
-                        style = MaterialTheme.typography.labelSmall,
-                        color = if (dirty) Warn else Muted,
+                        "GAME OPS",
+                        color = Brand,
+                        style = MaterialTheme.typography.labelSmall.copy(letterSpacing = 2.sp),
+                        fontWeight = FontWeight.Bold,
                     )
+                    Text("${source.name} / EDIT", style = MaterialTheme.typography.titleMedium)
                 }
             },
             navigationIcon = {
                 IconButton(onClick = { if (dirty) confirmExit = true else onBack() }) {
-                    Icon(
-                        Icons.AutoMirrored.Filled.ArrowBack,
-                        contentDescription = "返回",
-                        tint = Brand,
-                    )
+                    Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = "返回", tint = Brand)
                 }
+            },
+            actions = {
+                StatusBadge(
+                    text = if (dirty) "WIP" else "SYNCED",
+                    tone = if (dirty) Tone.WARN else Tone.OK,
+                )
+                Spacer(Modifier.width(Spacing.sm))
             },
             colors = TopAppBarDefaults.topAppBarColors(
                 containerColor = MaterialTheme.colorScheme.surface,
@@ -146,15 +158,32 @@ fun MacroEditorScreen(
         )
 
         LazyColumn(
-            modifier = Modifier
-                .weight(1f)
-                .fillMaxWidth(),
+            modifier = Modifier.weight(1f).fillMaxWidth(),
             contentPadding = Spacing.screenPadding,
         ) {
-            item(key = "header") {
-                MacroHeader(name = name, onNameChange = { name = it }, stepCount = steps.size, totalMs = totalMs)
+            item(key = "preview") {
+                OpsCoordinatePreview(steps = steps)
+                Spacer(Modifier.height(Spacing.md))
             }
-            item(key = "steps_title") { SectionTitle("步骤") }
+            item(key = "header") {
+                OutlinedTextField(
+                    value = name,
+                    onValueChange = { name = it },
+                    label = { Text("宏名称") },
+                    singleLine = true,
+                    shape = FieldShape,
+                    modifier = Modifier.fillMaxWidth(),
+                )
+                Spacer(Modifier.height(Spacing.sm))
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    StatusBadge("${steps.size} STEP", Tone.BRAND)
+                    Spacer(Modifier.width(Spacing.sm))
+                    StatusBadge("约 ${formatMacroDuration(totalMs)}", Tone.NEUTRAL)
+                }
+            }
+            item(key = "steps_title") {
+                OpsSectionLabel("步骤时间轴", "${steps.size}")
+            }
             if (steps.isEmpty()) {
                 item(key = "empty") {
                     Text(
@@ -197,7 +226,6 @@ fun MacroEditorScreen(
 
         EditorBottomBar(
             onSave = {
-                // 名称留空时回退到原名，避免落盘空名导致列表无法辨认
                 val finalName = name.trim().ifBlank { source.name }
                 val snapshot = steps.toList()
                 savedName = finalName
@@ -236,27 +264,68 @@ fun MacroEditorScreen(
     }
 }
 
+/** 归一化坐标预览：网格 + 点击点 + 滑动路径，旋转/分辨率变化都不依赖像素缓存。 */
 @Composable
-private fun MacroHeader(
-    name: String,
-    onNameChange: (String) -> Unit,
-    stepCount: Int,
-    totalMs: Long,
-) {
-    Column(modifier = Modifier.fillMaxWidth()) {
-        OutlinedTextField(
-            value = name,
-            onValueChange = onNameChange,
-            label = { Text("宏名称") },
-            singleLine = true,
-            shape = FieldShape,
-            modifier = Modifier.fillMaxWidth(),
-        )
-        Spacer(Modifier.height(Spacing.sm))
-        Row(verticalAlignment = Alignment.CenterVertically) {
-            PillChip("$stepCount 步")
-            Spacer(Modifier.width(Spacing.sm))
-            PillChip("总时长 约 ${formatMacroDuration(totalMs)}", container = Surface2, content = Ink2)
+private fun OpsCoordinatePreview(steps: List<MacroStep>) {
+    Surface(shape = CardShape, color = Panel, border = BorderStroke(1.dp, Line), modifier = Modifier.fillMaxWidth()) {
+        Column {
+            Row(
+                modifier = Modifier.padding(horizontal = Spacing.md, vertical = Spacing.sm),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                Text(
+                    "归一化坐标预览",
+                    style = MaterialTheme.typography.labelSmall.copy(letterSpacing = 1.sp),
+                    color = Muted,
+                )
+                Spacer(Modifier.weight(1f))
+                Text("ROT 0", style = MaterialTheme.typography.labelSmall, color = PanelFaint)
+            }
+            Box(modifier = Modifier.fillMaxWidth().height(190.dp).clip(CardShape)) {
+                Canvas(modifier = Modifier.fillMaxSize()) {
+                    val w = size.width
+                    val h = size.height
+                    val grid = Line.copy(alpha = 0.35f)
+                    for (i in 1..4) {
+                        val x = w * i / 5f
+                        val y = h * i / 5f
+                        drawLine(grid, Offset(x, 0f), Offset(x, h), strokeWidth = 1f)
+                        drawLine(grid, Offset(0f, y), Offset(w, y), strokeWidth = 1f)
+                    }
+                    steps.filterIsInstance<MacroStep.Swipe>().forEach { swipe ->
+                        if (swipe.points.size >= 2) {
+                            val path = Path().apply {
+                                moveTo(swipe.points[0].x * w, swipe.points[0].y * h)
+                                swipe.points.drop(1).forEach { point -> lineTo(point.x * w, point.y * h) }
+                            }
+                            drawPath(
+                                path = path,
+                                color = Violet,
+                                style = Stroke(
+                                    width = 2f,
+                                    pathEffect = PathEffect.dashPathEffect(floatArrayOf(8f, 6f), 0f),
+                                ),
+                            )
+                        }
+                    }
+                    steps.forEach { step ->
+                        when (step) {
+                            is MacroStep.Tap -> drawCircle(Brand, radius = 6f, center = Offset(step.x * w, step.y * h))
+                            is MacroStep.LongPress -> drawCircle(Warn, radius = 6f, center = Offset(step.x * w, step.y * h))
+                            is MacroStep.Swipe -> step.points.forEach { point ->
+                                drawCircle(Violet, radius = 3.5f, center = Offset(point.x * w, point.y * h))
+                            }
+                            is MacroStep.Wait -> Unit
+                        }
+                    }
+                }
+                Text(
+                    "NORMALIZED 0–1 · 点击 / 轨迹",
+                    modifier = Modifier.align(Alignment.BottomStart).padding(Spacing.sm),
+                    style = MaterialTheme.typography.labelSmall,
+                    color = PanelFaint,
+                )
+            }
         }
     }
 }
@@ -277,50 +346,39 @@ private fun StepEditorRow(
     val visual = stepVisual(step)
     Surface(
         shape = CardShape,
-        color = MaterialTheme.colorScheme.surface,
-        border = BorderStroke(1.dp, if (expanded) Brand.copy(alpha = 0.45f) else MaterialTheme.colorScheme.outlineVariant),
-        modifier = Modifier
-            .fillMaxWidth()
-            .padding(bottom = Spacing.sm),
+        color = Surface2,
+        border = BorderStroke(
+            1.dp,
+            if (expanded) Brand.copy(alpha = 0.5f) else Line,
+        ),
+        modifier = Modifier.fillMaxWidth().padding(bottom = Spacing.sm),
     ) {
-        Column(modifier = Modifier.padding(Spacing.md)) {
+        Column(modifier = Modifier.padding(Spacing.sm)) {
             Row(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .clickable(onClick = onToggle),
+                modifier = Modifier.fillMaxWidth().clickable(onClick = onToggle),
                 verticalAlignment = Alignment.CenterVertically,
             ) {
                 SeqBadge(index + 1)
                 Spacer(Modifier.width(Spacing.sm))
-                PillChip(text = visual.label, container = visual.container, content = visual.content)
+                Surface(shape = SmShape, color = visual.container, border = BorderStroke(1.dp, visual.content.copy(alpha = 0.3f)), modifier = Modifier.size(28.dp)) {
+                    Box(contentAlignment = Alignment.Center) {
+                        Icon(visual.icon, contentDescription = null, tint = visual.content, modifier = Modifier.size(15.dp))
+                    }
+                }
                 Spacer(Modifier.width(Spacing.sm))
-                Text(
-                    stepSubtitle(step),
-                    style = MaterialTheme.typography.labelSmall,
-                    color = Muted,
-                    maxLines = 1,
-                    overflow = TextOverflow.Ellipsis,
-                    modifier = Modifier.weight(1f),
-                )
-                StepIconButton(
-                    icon = Icons.Filled.KeyboardArrowUp,
-                    description = "上移",
-                    enabled = index > 0,
-                    onClick = onMoveUp,
-                )
-                StepIconButton(
-                    icon = Icons.Filled.KeyboardArrowDown,
-                    description = "下移",
-                    enabled = index < lastIndex,
-                    onClick = onMoveDown,
-                )
-                StepIconButton(
-                    icon = Icons.Filled.Delete,
-                    description = "删除",
-                    enabled = true,
-                    tint = Danger,
-                    onClick = onDelete,
-                )
+                Column(Modifier.weight(1f)) {
+                    Text(visual.label, style = MaterialTheme.typography.bodySmall, color = Ink, fontWeight = FontWeight.SemiBold)
+                    Text(
+                        stepSubtitle(step),
+                        style = MaterialTheme.typography.labelSmall,
+                        color = Muted,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis,
+                    )
+                }
+                StepIconButton(Icons.Filled.KeyboardArrowUp, "上移", index > 0, onMoveUp)
+                StepIconButton(Icons.Filled.KeyboardArrowDown, "下移", index < lastIndex, onMoveDown)
+                StepIconButton(Icons.Filled.Delete, "删除", true, onDelete, Danger)
             }
 
             if (expanded) {
@@ -328,38 +386,34 @@ private fun StepEditorRow(
                     val isWait = step is MacroStep.Wait
                     val minMs = if (isWait) 0 else MacroStep.MIN_DURATION_MS
                     val maxMs = if (isWait) MacroStep.MAX_DURATION_MS else STEP_DURATION_CEILING_MS
-                    // 录制得到的时长可能超出滑条量程，落在滑条上时先夹紧，拖动后写入新值
                     val shownMs = currentDurationMs(step).coerceIn(minMs, maxMs)
-                    Text(
-                        if (isWait) "等待 $shownMs ms" else "时长 $shownMs ms",
-                        style = MaterialTheme.typography.labelSmall,
-                        color = Ink2,
-                    )
+                    SliderLabel(if (isWait) "等待时长" else "手势持续", "$shownMs ms")
                     Slider(
                         value = shownMs.toFloat(),
                         onValueChange = { onUpdate(step.withDuration(it.roundToInt())) },
                         valueRange = minMs.toFloat()..maxMs.toFloat(),
                     )
-                    Spacer(Modifier.height(Spacing.sm))
-                    // 延迟可编辑：录制只能给出"上一次抬手到这一次按下"的估算，
-                    // 游戏加载/动画需要更长的固定等待，必须让用户自己调。
+                    // 延迟可编辑：录制只能给出估算，游戏加载/动画需要用户自己调。
                     val delayMs = step.delayBeforeMs.coerceIn(0L, STEP_DELAY_CEILING_MS.toLong()).toInt()
-                    Text(
-                        "等待 $delayMs ms 再执行",
-                        style = MaterialTheme.typography.labelSmall,
-                        color = Ink2,
-                    )
+                    SliderLabel("执行前等待", "$delayMs ms")
                     Slider(
                         value = delayMs.toFloat(),
                         onValueChange = { onUpdate(step.withDelayBefore(it.toLong())) },
                         valueRange = 0f..STEP_DELAY_CEILING_MS.toFloat(),
                     )
                     Spacer(Modifier.height(Spacing.sm))
-                    SecondaryButton(
-                        text = "测试这一步",
-                        icon = Icons.Filled.PlayArrow,
+                    Button(
                         onClick = onTest,
-                    )
+                        shape = ButtonShape,
+                        colors = ButtonDefaults.buttonColors(containerColor = Surface2, contentColor = Brand),
+                        border = BorderStroke(1.dp, LineStrong),
+                        elevation = ButtonDefaults.buttonElevation(defaultElevation = 0.dp),
+                        modifier = Modifier.height(34.dp),
+                    ) {
+                        Icon(Icons.Filled.PlayArrow, contentDescription = null, modifier = Modifier.size(14.dp))
+                        Spacer(Modifier.width(Spacing.xs))
+                        Text("测试这一步", style = MaterialTheme.typography.labelSmall)
+                    }
                 }
             }
         }
@@ -367,14 +421,19 @@ private fun StepEditorRow(
 }
 
 @Composable
+private fun SliderLabel(label: String, value: String) {
+    Row(modifier = Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+        Text(label, style = MaterialTheme.typography.labelSmall, color = Muted)
+        Spacer(Modifier.weight(1f))
+        Text(value, style = MaterialTheme.typography.labelSmall, color = Brand, fontWeight = FontWeight.Bold)
+    }
+}
+
+@Composable
 private fun SeqBadge(number: Int) {
-    Surface(shape = CircleShape, color = BrandSoft, modifier = Modifier.size(22.dp)) {
+    Surface(shape = SmShape, color = BrandSoft, modifier = Modifier.size(22.dp), border = BorderStroke(1.dp, Brand.copy(alpha = 0.3f))) {
         Box(contentAlignment = Alignment.Center) {
-            Text(
-                number.toString(),
-                style = MaterialTheme.typography.labelSmall,
-                color = BrandStrong,
-            )
+            Text(number.toString(), style = MaterialTheme.typography.labelSmall, color = BrandStrong)
         }
     }
 }
@@ -384,14 +443,10 @@ private fun StepIconButton(
     icon: ImageVector,
     description: String,
     enabled: Boolean,
-    tint: Color = Muted,
     onClick: () -> Unit,
+    tint: Color = Muted,
 ) {
-    IconButton(
-        onClick = onClick,
-        enabled = enabled,
-        modifier = Modifier.size(30.dp),
-    ) {
+    IconButton(onClick = onClick, enabled = enabled, modifier = Modifier.size(30.dp)) {
         Icon(
             icon,
             contentDescription = description,
@@ -403,30 +458,32 @@ private fun StepIconButton(
 
 @Composable
 private fun EditorBottomBar(onSave: () -> Unit, onDelete: () -> Unit) {
-    Column(
-        modifier = Modifier
-            .fillMaxWidth()
-            .background(MaterialTheme.colorScheme.surface),
+    Surface(
+        modifier = Modifier.fillMaxWidth(),
+        color = MaterialTheme.colorScheme.surface,
+        border = BorderStroke(1.dp, Line),
     ) {
-        Box(
-            modifier = Modifier
-                .fillMaxWidth()
-                .height(1.dp)
-                .background(Line),
-        )
-        Column(modifier = Modifier.padding(horizontal = Spacing.lg, vertical = Spacing.md)) {
-            PrimaryButton(text = "保存", onClick = onSave)
-            Spacer(Modifier.height(Spacing.sm))
-            DangerButton(text = "删除宏", onClick = onDelete)
-            Text(
-                "保存后在列表运行",
-                style = MaterialTheme.typography.labelSmall,
-                color = Muted,
-                textAlign = TextAlign.Center,
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .padding(top = Spacing.xs),
-            )
+        Row(modifier = Modifier.padding(horizontal = Spacing.lg, vertical = Spacing.md), verticalAlignment = Alignment.CenterVertically) {
+            Button(
+                onClick = onSave,
+                modifier = Modifier.weight(1f).height(44.dp),
+                shape = ButtonShape,
+                colors = ButtonDefaults.buttonColors(containerColor = Brand, contentColor = OnBrand),
+                elevation = ButtonDefaults.buttonElevation(defaultElevation = 0.dp),
+            ) {
+                Text("保存宏", style = MaterialTheme.typography.bodySmall, fontWeight = FontWeight.Bold)
+            }
+            Spacer(Modifier.width(Spacing.sm))
+            Button(
+                onClick = onDelete,
+                modifier = Modifier.weight(1f).height(44.dp),
+                shape = ButtonShape,
+                colors = ButtonDefaults.buttonColors(containerColor = DangerBg, contentColor = Danger),
+                border = BorderStroke(1.dp, Danger.copy(alpha = 0.4f)),
+                elevation = ButtonDefaults.buttonElevation(defaultElevation = 0.dp),
+            ) {
+                Text("删除宏", style = MaterialTheme.typography.bodySmall)
+            }
         }
     }
 }
@@ -434,20 +491,12 @@ private fun EditorBottomBar(onSave: () -> Unit, onDelete: () -> Unit) {
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 private fun MissingMacro(onBack: () -> Unit) {
-    Column(
-        modifier = Modifier
-            .fillMaxSize()
-            .background(MaterialTheme.colorScheme.background),
-    ) {
+    Column(modifier = Modifier.fillMaxSize().background(MaterialTheme.colorScheme.background)) {
         TopAppBar(
-            title = { Text("编辑宏", style = MaterialTheme.typography.titleMedium) },
+            title = { Text("宏工作台", style = MaterialTheme.typography.titleMedium) },
             navigationIcon = {
                 IconButton(onClick = onBack) {
-                    Icon(
-                        Icons.AutoMirrored.Filled.ArrowBack,
-                        contentDescription = "返回",
-                        tint = Brand,
-                    )
+                    Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = "返回", tint = Brand)
                 }
             },
             colors = TopAppBarDefaults.topAppBarColors(
@@ -456,18 +505,11 @@ private fun MissingMacro(onBack: () -> Unit) {
             ),
         )
         Column(
-            modifier = Modifier
-                .fillMaxSize()
-                .padding(Spacing.xl),
+            modifier = Modifier.fillMaxSize().padding(Spacing.xl),
             horizontalAlignment = Alignment.CenterHorizontally,
         ) {
             Spacer(Modifier.height(Spacing.xxl))
-            IconCircle(
-                icon = Icons.Filled.SearchOff,
-                tint = Danger,
-                container = DangerBg,
-                size = 56.dp,
-            )
+            IconCircle(icon = Icons.Filled.SearchOff, tint = Danger, container = DangerBg, size = 56.dp)
             Spacer(Modifier.height(Spacing.md))
             Text("宏不存在", style = MaterialTheme.typography.titleMedium)
             Spacer(Modifier.height(Spacing.xs))
@@ -487,19 +529,21 @@ private fun MissingMacro(onBack: () -> Unit) {
 // 步骤展示 / 变更辅助
 // ---------------------------------------------------------------------------
 
-/** 交互步骤时长滑条上限：与视觉规范 3s 对齐，超出量程的录制值夹紧显示 */
 private const val STEP_DURATION_CEILING_MS = 3_000
-
-/** 步骤前等待的滑条上限；超过 5 秒的等待用「等待」步骤表达更清楚 */
 private const val STEP_DELAY_CEILING_MS = 5_000
 
-private data class StepVisual(val label: String, val container: Color, val content: Color)
+private data class StepVisual(
+    val label: String,
+    val icon: ImageVector,
+    val container: Color,
+    val content: Color,
+)
 
 private fun stepVisual(step: MacroStep): StepVisual = when (step) {
-    is MacroStep.Tap -> StepVisual("点击", BrandSoft, BrandStrong)
-    is MacroStep.Swipe -> StepVisual("滑动", InfoBg, Info)
-    is MacroStep.LongPress -> StepVisual("长按", WarnBg, Warn)
-    is MacroStep.Wait -> StepVisual("等待", Surface2, Muted)
+    is MacroStep.Tap -> StepVisual("点击", Icons.Filled.TouchApp, BrandSoft, BrandStrong)
+    is MacroStep.Swipe -> StepVisual("滑动", Icons.Filled.Directions, VioletBg, Violet)
+    is MacroStep.LongPress -> StepVisual("长按", Icons.Filled.TouchApp, WarnBg, Warn)
+    is MacroStep.Wait -> StepVisual("等待", Icons.Filled.Schedule, Surface2, Muted)
 }
 
 private fun stepSubtitle(step: MacroStep): String = when (step) {

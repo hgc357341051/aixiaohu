@@ -1,36 +1,24 @@
 package com.aixiaohuadb.ui.macros
 
 import androidx.compose.foundation.BorderStroke
-import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Arrangement
-import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
-import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
-import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
-import androidx.compose.foundation.lazy.LazyColumn
-import androidx.compose.foundation.lazy.items
 import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.automirrored.filled.ArrowBack
-import androidx.compose.material.icons.filled.Info
-import androidx.compose.material.icons.filled.VideogameAsset
+import androidx.compose.material.icons.filled.Link
+import androidx.compose.material.icons.filled.Visibility
+import androidx.compose.material.icons.filled.VisibilityOff
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
-import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.Icon
-import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
-import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
-import androidx.compose.material3.TextButton
-import androidx.compose.material3.TopAppBar
-import androidx.compose.material3.TopAppBarDefaults
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
@@ -38,7 +26,7 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.text.style.TextAlign
+import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import com.aixiaohuadb.domain.macro.MacroAdapter
@@ -46,16 +34,18 @@ import com.aixiaohuadb.domain.macro.MacroStep
 import com.aixiaohuadb.service.MacroConfig
 import com.aixiaohuadb.ui.common.ConfirmDialog
 import com.aixiaohuadb.ui.common.IconCircle
-import com.aixiaohuadb.ui.common.PillChip
-import com.aixiaohuadb.ui.common.PrimaryButton
+import com.aixiaohuadb.ui.common.InfoCard
+import com.aixiaohuadb.ui.common.OpsHeroCard
+import com.aixiaohuadb.ui.common.OpsMacroCard
+import com.aixiaohuadb.ui.common.OpsSectionLabel
+import com.aixiaohuadb.ui.common.ScreenFrame
+import com.aixiaohuadb.ui.common.StatusBadge
+import com.aixiaohuadb.ui.common.Tone
 import com.aixiaohuadb.ui.theme.Brand
 import com.aixiaohuadb.ui.theme.BrandSoft
-import com.aixiaohuadb.ui.theme.BrandStrong
 import com.aixiaohuadb.ui.theme.ButtonShape
-import com.aixiaohuadb.ui.theme.CardShape
 import com.aixiaohuadb.ui.theme.Danger
-import com.aixiaohuadb.ui.theme.Ink2
-import com.aixiaohuadb.ui.theme.Line
+import com.aixiaohuadb.ui.theme.DangerBg
 import com.aixiaohuadb.ui.theme.Muted
 import com.aixiaohuadb.ui.theme.OnBrand
 import com.aixiaohuadb.ui.theme.Spacing
@@ -66,12 +56,9 @@ import java.time.temporal.ChronoUnit
 import kotlin.math.roundToInt
 
 /**
- * 宏列表：只读展示 + 三个回调动作，不直接触碰 OverlayStore。
- *
- * 页面自带顶部栏与固定说明条（ScreenFrame 的内容区是 verticalScroll，放不下固定页脚），
- * 因此不渲染底部页签；[onTab] 与既有页面签名保持一致，由导航层注入备用。
+ * 宏库：以任务卡展示用户宏，所有动作通过回调上抛，不直接触碰 OverlayStore。
+ * 步骤时长口径与编辑器共用下方两个函数。
  */
-@OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun MacrosScreen(
     macros: List<MacroConfig>,
@@ -81,64 +68,119 @@ fun MacrosScreen(
     onEdit: (Long) -> Unit,
     onDelete: (Long) -> Unit,
     onNew: () -> Unit,
+    overlayEnabled: Boolean = true,
+    onToggleOverlay: (Boolean) -> Unit = {},
 ) {
     var pendingDelete by remember { mutableStateOf<MacroConfig?>(null) }
 
-    Column(
-        modifier = Modifier
-            .fillMaxSize()
-            .background(MaterialTheme.colorScheme.background),
+    ScreenFrame(
+        title = "宏库",
+        subtitle = "ACTIVE MISSIONS · 任务卡",
+        showBack = true,
+        onBack = onBack,
+        activeTab = "panel",
+        onTab = onTab,
     ) {
-        TopAppBar(
-            title = {
-                Column {
-                    Text("我的宏", style = MaterialTheme.typography.titleMedium)
+        OpsHeroCard(
+            title = "任务台就绪",
+            description = "录制的宏以任务卡展示；点运行直接回放，点编辑进入工作台调延迟与坐标。",
+            primaryLabel = "录制新宏",
+            onPrimary = onNew,
+            badge = "L1 DECK",
+        )
+
+        OpsSectionLabel("OVERLAY", "悬浮窗控制")
+        InfoCard {
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                IconCircle(
+                    icon = if (overlayEnabled) Icons.Filled.Visibility else Icons.Filled.VisibilityOff,
+                    tint = if (overlayEnabled) Brand else Danger,
+                    container = if (overlayEnabled) BrandSoft else DangerBg,
+                    size = 30.dp,
+                )
+                Spacer(Modifier.width(Spacing.sm))
+                Column(Modifier.weight(1f)) {
+                    Text("悬浮窗", style = MaterialTheme.typography.bodySmall, fontWeight = FontWeight.Bold)
                     Text(
-                        if (macros.isEmpty()) "尚未录制" else "共 ${macros.size} 个 · 抬手后生效",
+                        if (overlayEnabled) "游戏中显示悬浮球与宏按钮" else "已关闭：悬浮球与宏按钮全部隐藏",
                         style = MaterialTheme.typography.labelSmall,
                         color = Muted,
                     )
                 }
-            },
-            navigationIcon = {
-                IconButton(onClick = onBack) {
-                    Icon(
-                        Icons.AutoMirrored.Filled.ArrowBack,
-                        contentDescription = "返回",
-                        tint = Brand,
-                    )
-                }
-            },
-            colors = TopAppBarDefaults.topAppBarColors(
-                containerColor = MaterialTheme.colorScheme.surface,
-                titleContentColor = MaterialTheme.colorScheme.onSurface,
-            ),
-        )
-
-        if (macros.isEmpty()) {
-            EmptyMacros(
-                modifier = Modifier.weight(1f),
-                onNew = onNew,
-            )
-        } else {
-            LazyColumn(
-                modifier = Modifier
-                    .weight(1f)
-                    .fillMaxWidth(),
-                contentPadding = Spacing.screenPadding,
-            ) {
-                items(items = macros, key = { it.macroId }) { macro ->
-                    MacroRow(
-                        macro = macro,
-                        onRun = { onRun(macro.macroId) },
-                        onEdit = { onEdit(macro.macroId) },
-                        onDelete = { pendingDelete = macro },
+                Button(
+                    onClick = { onToggleOverlay(!overlayEnabled) },
+                    modifier = Modifier.height(34.dp),
+                    shape = ButtonShape,
+                    colors = ButtonDefaults.buttonColors(
+                        containerColor = if (overlayEnabled) DangerBg else Brand,
+                        contentColor = if (overlayEnabled) Danger else OnBrand,
+                    ),
+                    border = if (overlayEnabled) BorderStroke(1.dp, Danger.copy(alpha = 0.4f)) else null,
+                    elevation = ButtonDefaults.buttonElevation(defaultElevation = 0.dp),
+                    contentPadding = PaddingValues(horizontal = Spacing.md, vertical = Spacing.xs),
+                ) {
+                    Text(
+                        if (overlayEnabled) "关闭悬浮窗" else "重新开启",
+                        style = MaterialTheme.typography.labelSmall,
                     )
                 }
             }
         }
 
-        FooterNote()
+        OpsSectionLabel("ACTIVE MISSIONS", "共 ${macros.size} 个")
+        if (macros.isEmpty()) {
+            InfoCard {
+                Column(horizontalAlignment = Alignment.CenterHorizontally, modifier = Modifier.fillMaxWidth()) {
+                    IconCircle(icon = Icons.Filled.Link, tint = Brand, container = BrandSoft, size = 56.dp)
+                    Spacer(Modifier.height(Spacing.md))
+                    Text("还没有宏，先录一个", style = MaterialTheme.typography.titleSmall, fontWeight = FontWeight.Bold)
+                    Spacer(Modifier.height(Spacing.xs))
+                    Text(
+                        "录制一段手势，之后用悬浮按钮或直接点任务卡回放",
+                        style = MaterialTheme.typography.labelSmall,
+                        color = Muted,
+                    )
+                }
+            }
+        } else {
+            Column(verticalArrangement = Arrangement.spacedBy(Spacing.sm)) {
+                macros.chunked(2).forEach { pair ->
+                    Row(horizontalArrangement = Arrangement.spacedBy(Spacing.sm)) {
+                        pair.forEach { macro ->
+                            val durationMs = remember(macro.steps) {
+                                MacroAdapter.fromExecSteps(macro.steps).sumOf { macroStepDurationMs(it) }
+                            }
+                            OpsMacroCard(
+                                name = macro.name,
+                                summary = missionSummary(macro.steps),
+                                footerLeft = "${macro.steps.size} STEP",
+                                footerRight = formatMacroDuration(durationMs),
+                                onRun = { onRun(macro.macroId) },
+                                onEdit = { onEdit(macro.macroId) },
+                                onDelete = { pendingDelete = macro },
+                                modifier = Modifier.weight(1f),
+                            )
+                        }
+                        if (pair.size == 1) Spacer(Modifier.weight(1f))
+                    }
+                }
+            }
+        }
+
+        Spacer(Modifier.height(Spacing.md))
+        InfoCard {
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                StatusBadge("录制口径", Tone.WARN)
+                Spacer(Modifier.width(Spacing.sm))
+                Text(
+                    "录制时用手势操作游戏，抬手后才会生效；时长可在工作台逐项调整。",
+                    style = MaterialTheme.typography.labelSmall,
+                    color = Muted,
+                    modifier = Modifier.weight(1f),
+                )
+            }
+        }
+        Spacer(Modifier.height(Spacing.sm))
     }
 
     pendingDelete?.let { target ->
@@ -155,142 +197,17 @@ fun MacrosScreen(
     }
 }
 
-@Composable
-private fun EmptyMacros(modifier: Modifier = Modifier, onNew: () -> Unit) {
-    Column(
-        modifier = modifier
-            .fillMaxWidth()
-            .padding(Spacing.xl),
-        horizontalAlignment = Alignment.CenterHorizontally,
-        verticalArrangement = Arrangement.Center,
-    ) {
-        IconCircle(
-            icon = Icons.Filled.VideogameAsset,
-            tint = BrandStrong,
-            container = BrandSoft,
-            size = 64.dp,
-        )
-        Spacer(Modifier.height(Spacing.md))
-        Text("还没有宏，先录一个", style = MaterialTheme.typography.titleMedium)
-        Spacer(Modifier.height(Spacing.xs))
-        Text(
-            "录制一段手势，之后用悬浮按钮或语音一句话回放",
-            style = MaterialTheme.typography.labelSmall,
-            color = Muted,
-            textAlign = TextAlign.Center,
-        )
-        Spacer(Modifier.height(Spacing.lg))
-        PrimaryButton(text = "开始录制", onClick = onNew)
-    }
-}
-
-@Composable
-private fun MacroRow(
-    macro: MacroConfig,
-    onRun: () -> Unit,
-    onEdit: () -> Unit,
-    onDelete: () -> Unit,
-) {
-    // 估算时长与 MacroDocument.estimatedDurationMs 同一口径：步上前置等待 + 手势/等待时长
-    val durationMs = remember(macro.steps) {
-        MacroAdapter.fromExecSteps(macro.steps).sumOf { macroStepDurationMs(it) }
-    }
-    val createdText = remember(macro.createdAt) { relativeDayLabel(macro.createdAt) }
-
-    Surface(
-        shape = CardShape,
-        color = MaterialTheme.colorScheme.surface,
-        border = BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant),
-        modifier = Modifier
-            .fillMaxWidth()
-            .padding(bottom = Spacing.md),
-    ) {
-        Row(
-            modifier = Modifier
-                .fillMaxWidth()
-                .padding(Spacing.md),
-            verticalAlignment = Alignment.CenterVertically,
-        ) {
-            Column(modifier = Modifier.weight(1f)) {
-                Text(
-                    macro.name,
-                    style = MaterialTheme.typography.titleMedium,
-                    maxLines = 1,
-                    overflow = TextOverflow.Ellipsis,
-                )
-                Spacer(Modifier.height(Spacing.xs))
-                Row(verticalAlignment = Alignment.CenterVertically) {
-                    PillChip("${macro.steps.size} 步")
-                    Spacer(Modifier.width(Spacing.sm))
-                    Text(
-                        "约 ${formatMacroDuration(durationMs)}",
-                        style = MaterialTheme.typography.labelSmall,
-                        color = Ink2,
-                    )
-                }
-                Spacer(Modifier.height(Spacing.xs))
-                Text(createdText, style = MaterialTheme.typography.labelSmall, color = Muted)
-            }
-            Spacer(Modifier.width(Spacing.sm))
-            Column(horizontalAlignment = Alignment.End) {
-                Button(
-                    onClick = onRun,
-                    modifier = Modifier.height(34.dp),
-                    shape = ButtonShape,
-                    colors = ButtonDefaults.buttonColors(containerColor = Brand, contentColor = OnBrand),
-                    contentPadding = PaddingValues(horizontal = Spacing.md, vertical = Spacing.xs),
-                    elevation = ButtonDefaults.buttonElevation(defaultElevation = 0.dp),
-                ) {
-                    Text("运行", style = MaterialTheme.typography.labelLarge)
-                }
-                Row(verticalAlignment = Alignment.CenterVertically) {
-                    TextButton(onClick = onEdit) {
-                        Text("编辑", style = MaterialTheme.typography.labelSmall, color = Brand)
-                    }
-                    TextButton(onClick = onDelete) {
-                        Text("删除", style = MaterialTheme.typography.labelSmall, color = Danger)
-                    }
-                }
-            }
+@Suppress("DEPRECATION")
+private fun missionSummary(steps: List<com.aixiaohuadb.exec.ExecStep>): String =
+    steps.take(4).joinToString(" · ") { step ->
+        when (step) {
+            is com.aixiaohuadb.exec.ExecStep.Tap -> "点击"
+            is com.aixiaohuadb.exec.ExecStep.Swipe -> "滑动"
+            is com.aixiaohuadb.exec.ExecStep.MultiGesture -> "多指"
+            is com.aixiaohuadb.exec.ExecStep.Wait -> "等待"
+            is com.aixiaohuadb.exec.ExecStep.Verify -> "校验"
         }
-    }
-}
-
-/** 固定在底部的录制口径说明：解释转发录制为什么会有一拍延迟 */
-@Composable
-private fun FooterNote() {
-    Column(
-        modifier = Modifier
-            .fillMaxWidth()
-            .background(MaterialTheme.colorScheme.surface),
-    ) {
-        Box(
-            modifier = Modifier
-                .fillMaxWidth()
-                .height(1.dp)
-                .background(Line),
-        )
-        Row(
-            modifier = Modifier
-                .fillMaxWidth()
-                .padding(horizontal = Spacing.lg, vertical = Spacing.md),
-            verticalAlignment = Alignment.CenterVertically,
-        ) {
-            Icon(
-                Icons.Filled.Info,
-                contentDescription = null,
-                tint = Muted,
-                modifier = Modifier.size(15.dp),
-            )
-            Spacer(Modifier.width(Spacing.sm))
-            Text(
-                "录制时用手势操作游戏，抬手后才会生效",
-                style = MaterialTheme.typography.labelSmall,
-                color = Muted,
-            )
-        }
-    }
-}
+    } + if (steps.size > 4) " …" else ""
 
 /** 单步占用时长：前置等待 + 手势/等待时长，与 MacroDocument.estimatedDurationMs 同口径 */
 internal fun macroStepDurationMs(step: MacroStep): Long = step.delayBeforeMs + when (step) {

@@ -12,6 +12,10 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.width
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.AddCircle
+import androidx.compose.material.icons.filled.Link
+import androidx.compose.material.icons.filled.Mic
+import androidx.compose.material.icons.filled.MicOff
+import androidx.compose.material.icons.filled.Security
 import androidx.compose.material.icons.filled.TouchApp
 import androidx.compose.material.icons.filled.VideogameAsset
 import androidx.compose.material3.AlertDialog
@@ -31,30 +35,36 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import com.aixiaohuadb.service.ControlMode
+import com.aixiaohuadb.service.ForegroundGameMonitor
+import com.aixiaohuadb.service.OverlayControlService
 import com.aixiaohuadb.service.OverlayWidget
 import com.aixiaohuadb.service.OverlayWidget.Companion.MAX_ALPHA
 import com.aixiaohuadb.service.OverlayWidget.Companion.MAX_SIZE_DP
 import com.aixiaohuadb.service.OverlayWidget.Companion.MIN_ALPHA
 import com.aixiaohuadb.service.OverlayWidget.Companion.MIN_SIZE_DP
-import com.aixiaohuadb.service.ForegroundGameMonitor
-import com.aixiaohuadb.service.OverlayControlService
 import com.aixiaohuadb.ui.common.InfoCard
+import com.aixiaohuadb.ui.common.OpsLinkChain
+import com.aixiaohuadb.ui.common.OpsMatrixCard
+import com.aixiaohuadb.ui.common.OpsSafeZone
+import com.aixiaohuadb.ui.common.OpsSectionLabel
 import com.aixiaohuadb.ui.common.QuietButton
 import com.aixiaohuadb.ui.common.ScreenFrame
 import com.aixiaohuadb.ui.common.SectionCard
 import com.aixiaohuadb.ui.common.Segment
 import com.aixiaohuadb.ui.common.ToggleRow
 import com.aixiaohuadb.ui.common.WarningCard
+import com.aixiaohuadb.ui.theme.Brand
 import com.aixiaohuadb.ui.theme.Danger
 import com.aixiaohuadb.ui.theme.Muted
 import com.aixiaohuadb.ui.theme.Spacing
 import kotlin.math.roundToInt
 
 /**
- * 悬浮控制一页化设置：权限引导 → 待命名宏 → 球配置 → 已创建按钮/宏 → 添加指令。
- * 滑条实时写 OverlayStore（内存即时生效 + 落盘防抖），悬浮件即时变形预览。
+ * 链路与悬浮：把能力矩阵、执行优先级、权限与悬浮参数放在同一套 GAME OPS 语言里。
+ * 权限、命名、绑定等真实流程全部保留，只替换组织形式与视觉。
  */
 @Composable
 fun OverlayControlScreen(
@@ -78,8 +88,8 @@ fun OverlayControlScreen(
     var bindingPhrase by remember { mutableStateOf("") }
 
     ScreenFrame(
-        title = "悬浮控制",
-        subtitle = "游戏内长按悬浮球可直接调节",
+        title = "链路与悬浮",
+        subtitle = "LINK MATRIX · 执行优先级与权限",
         showBack = true,
         onBack = onBack,
         activeTab = "settings",
@@ -103,7 +113,7 @@ fun OverlayControlScreen(
             Spacer(Modifier.height(Spacing.md))
         }
         if (granted && !trackingReady) {
-            WarningCard("无法检测王者荣耀是否在前台：请开启无障碍服务，或授予「使用情况访问」权限，否则指令按钮不会显示。")
+            WarningCard("无法检测游戏是否在前台：请开启无障碍服务，或授予「使用情况访问」权限，否则指令按钮不会显示。")
             QuietButton(
                 text = "去开启使用情况访问",
                 onClick = {
@@ -113,14 +123,65 @@ fun OverlayControlScreen(
             Spacer(Modifier.height(Spacing.md))
         }
 
-        // 控制模式：三值并列，语音未开启时二次确认
-        SectionCard(icon = Icons.Filled.VideogameAsset, title = "控制模式") {
+        OpsSectionLabel("LINK MATRIX", "执行链优先级 · 运行时状态")
+        val adbPrimary = controlMode == ControlMode.ADB
+        val a11yPrimary = controlMode == ControlMode.ACCESSIBILITY
+        val voiceActive = voiceEnabled && controlMode == ControlMode.VOICE
+        Row(Modifier.fillMaxWidth()) {
+            androidx.compose.foundation.layout.Box(Modifier.weight(1f)) {
+                OpsMatrixCard(
+                    icon = Icons.Filled.Link,
+                    title = "ADB 注入",
+                    status = if (adbPrimary) "PRIMARY" else "STANDBY",
+                    description = "宏回放优先走系统输入子系统，游戏识别为真实输入；链路页可开启 ADB 录制。",
+                    primary = adbPrimary,
+                )
+            }
+            Spacer(Modifier.width(Spacing.sm))
+            androidx.compose.foundation.layout.Box(Modifier.weight(1f)) {
+                OpsMatrixCard(
+                    icon = Icons.Filled.TouchApp,
+                    title = "无障碍转发",
+                    status = if (a11yPrimary) "PRIMARY" else "READY",
+                    description = "录制主路径，也是 ADB 不可用时的回放降级路径。",
+                    primary = a11yPrimary,
+                )
+            }
+        }
+        Spacer(Modifier.height(Spacing.sm))
+        Row(Modifier.fillMaxWidth()) {
+            androidx.compose.foundation.layout.Box(Modifier.weight(1f)) {
+                OpsMatrixCard(
+                    icon = if (voiceActive) Icons.Filled.Mic else Icons.Filled.MicOff,
+                    title = "语音识别",
+                    status = if (voiceActive) "ACTIVE" else "OFF",
+                    description = "仅在显式开启后拾音，并提示常驻通知与麦克风。",
+                )
+            }
+            Spacer(Modifier.width(Spacing.sm))
+            androidx.compose.foundation.layout.Box(Modifier.weight(1f)) {
+                OpsMatrixCard(
+                    icon = Icons.Filled.Security,
+                    title = "只读回执",
+                    status = "FALLBACK",
+                    description = "注入失败时显示失败原因，不再静默跳过。",
+                )
+            }
+        }
+
+        Spacer(Modifier.height(Spacing.sm))
+        OpsLinkChain()
+        Spacer(Modifier.height(Spacing.sm))
+        InfoCard {
             Text(
-                "默认无障碍模式，不拾音。语音需显式开启；ADB 保持前台长连接。",
-                style = MaterialTheme.typography.bodySmall,
+                "执行链优先级固定为 ADB → 无障碍 → 只读回执；上方「控制模式」只决定手动面板使用哪条链路，不会禁用其余能力。",
+                style = MaterialTheme.typography.labelSmall,
                 color = Muted,
             )
-            Spacer(Modifier.height(Spacing.sm))
+        }
+
+        OpsSectionLabel("INPUT MODE", "仅影响手动面板")
+        SectionCard(icon = Icons.Filled.VideogameAsset, title = "控制模式") {
             Segment(
                 options = listOf("语音识别", "无障碍", "ADB"),
                 selectedIndex = ControlMode.entries.indexOf(controlMode),
@@ -142,20 +203,22 @@ fun OverlayControlScreen(
             )
         }
 
-        InfoCard {
-            Text(
-                "悬浮球 = 模式入口（单击展开面板，面板内可切换模式、调节大小透明度、录制宏）；指令/宏按钮只在王者荣耀前台显示，单击直达执行，拖动调整位置、松手自动贴边。",
-                style = MaterialTheme.typography.bodySmall,
-            )
+        OpsSectionLabel("OVERLAY CONTROL", "实时生效")
+        OpsSafeZone()
+        Spacer(Modifier.height(Spacing.sm))
+        SectionCard(icon = Icons.Filled.TouchApp, title = "悬浮球") {
+            ToggleRow("显示悬浮球", "关闭后仅保留指令按钮", ball.visible) { vm.setBallVisible(it) }
+            ToggleRow("锁定位置", "游戏内禁止拖动，防误触", ball.locked) { vm.setBallLocked(it) }
+            BallSliders(sizeDp = ball.sizeDp, alphaPercent = ball.alphaPercent, onChange = vm::updateBallLive)
         }
 
-        // 待命名宏（录制后命名窗被 ROM 拦截时的兜底）
         pendingMacro?.let { pm ->
+            Spacer(Modifier.height(Spacing.sm))
             SectionCard(icon = Icons.Filled.VideogameAsset, title = "待命名宏") {
-                var name by remember { mutableStateOf(pm.name) }
+                var pendingName by remember { mutableStateOf(pm.name) }
                 OutlinedTextField(
-                    value = name,
-                    onValueChange = { name = it },
+                    value = pendingName,
+                    onValueChange = { pendingName = it },
                     modifier = Modifier.fillMaxWidth(),
                     label = { Text("宏名称") },
                     singleLine = true,
@@ -166,23 +229,17 @@ fun OverlayControlScreen(
                     color = Muted,
                     modifier = Modifier.padding(top = Spacing.xs),
                 )
-                Row(modifier = Modifier.fillMaxWidth().padding(top = Spacing.sm)) {
-                    QuietButton(text = "保存宏", onClick = { vm.savePendingMacro(name) })
+                Spacer(Modifier.height(Spacing.sm))
+                Row(modifier = Modifier.fillMaxWidth()) {
+                    QuietButton(text = "保存宏", onClick = { vm.savePendingMacro(pendingName) })
                     Spacer(Modifier.width(Spacing.sm))
                     QuietButton(text = "丢弃", onClick = { vm.discardPendingMacro() })
                 }
             }
         }
 
-        // 悬浮球配置
-        SectionCard(icon = Icons.Filled.TouchApp, title = "悬浮球") {
-            ToggleRow("显示悬浮球", "关闭后仅保留指令按钮", ball.visible) { vm.setBallVisible(it) }
-            ToggleRow("锁定位置", "游戏内禁止拖动，防误触", ball.locked) { vm.setBallLocked(it) }
-            BallSliders(sizeDp = ball.sizeDp, alphaPercent = ball.alphaPercent, onChange = vm::updateBallLive)
-        }
-
-        // 已创建按钮与宏
         if (widgets.isNotEmpty()) {
+            Spacer(Modifier.height(Spacing.sm))
             SectionCard(icon = Icons.Filled.TouchApp, title = "已创建（${widgets.size}）") {
                 widgets.forEachIndexed { index, w ->
                     WidgetRow(
@@ -196,21 +253,17 @@ fun OverlayControlScreen(
             }
         }
 
-        // 宏管理
         if (macros.isNotEmpty()) {
+            Spacer(Modifier.height(Spacing.sm))
             SectionCard(icon = Icons.Filled.VideogameAsset, title = "我的宏（${macros.size}）") {
                 var renameTarget by remember { mutableStateOf<Long?>(null) }
                 macros.forEach { m ->
                     Row(verticalAlignment = Alignment.CenterVertically) {
                         Column(modifier = Modifier.weight(1f)) {
-                            Text(m.name, style = MaterialTheme.typography.titleSmall)
-                            Text(
-                                "${m.steps.size} 步",
-                                style = MaterialTheme.typography.labelSmall,
-                                color = Muted,
-                            )
+                            Text(m.name, style = MaterialTheme.typography.bodySmall, fontWeight = FontWeight.SemiBold)
+                            Text("${m.steps.size} 步", style = MaterialTheme.typography.labelSmall, color = Muted)
                         }
-                        TextButton(onClick = { renameTarget = m.macroId }) { Text("重命名") }
+                        TextButton(onClick = { renameTarget = m.macroId }) { Text("重命名", color = Brand) }
                         TextButton(onClick = { vm.removeMacro(m.macroId) }) { Text("删除", color = Danger) }
                     }
                 }
@@ -219,22 +272,23 @@ fun OverlayControlScreen(
                     if (current == null) {
                         renameTarget = null
                     } else {
-                        var name by remember(macroId) { mutableStateOf(current.name) }
+                        var renameText by remember(macroId) { mutableStateOf(current.name) }
                         AlertDialog(
                             onDismissRequest = { renameTarget = null },
+                            containerColor = com.aixiaohuadb.ui.theme.Panel,
                             title = { Text("重命名宏") },
                             text = {
                                 OutlinedTextField(
-                                    value = name,
-                                    onValueChange = { name = it },
+                                    value = renameText,
+                                    onValueChange = { renameText = it },
                                     singleLine = true,
                                 )
                             },
                             confirmButton = {
                                 TextButton(onClick = {
-                                    vm.renameMacro(macroId, name)
+                                    vm.renameMacro(macroId, renameText)
                                     renameTarget = null
-                                }) { Text("保存") }
+                                }) { Text("保存", color = Brand) }
                             },
                             dismissButton = {
                                 TextButton(onClick = { renameTarget = null }) { Text("取消") }
@@ -245,10 +299,10 @@ fun OverlayControlScreen(
             }
         }
 
-        // 语音槽位绑定：0..13（14 为拒识槽，不可绑定），说法 → 用户宏
+        Spacer(Modifier.height(Spacing.sm))
         SectionCard(icon = Icons.Filled.AddCircle, title = "语音指令绑定") {
             Text(
-                "内置固定指令已删除。把识别槽位绑定到你录制的宏，指令名只用于提示；槽位 15 为拒识槽不可绑定。",
+                "内置固定指令已删除。把识别槽位绑定到你录制的宏；槽位 15 为拒识槽不可绑定。",
                 style = MaterialTheme.typography.labelSmall,
                 color = Muted,
             )
@@ -291,7 +345,7 @@ fun OverlayControlScreen(
                 }
             }
             Text(
-                "录制自定义宏：进游戏后单击悬浮球展开面板 → 开始录制；📷 截屏后可在应用内标注。",
+                "录制自定义宏：进游戏后单击悬浮球展开面板 → 开始录制；录制中点「暂停」可让触摸透传给游戏。",
                 style = MaterialTheme.typography.labelSmall,
                 color = Muted,
                 modifier = Modifier.padding(top = Spacing.xs),
@@ -303,13 +357,14 @@ fun OverlayControlScreen(
     if (pendingVoice) {
         AlertDialog(
             onDismissRequest = { pendingVoice = false },
+            containerColor = com.aixiaohuadb.ui.theme.Panel,
             title = { Text("开启语音识别？") },
             text = { Text("将启动麦克风拾音、加载语音模型并显示常驻通知。关闭后物理释放，不会后台监听。") },
             confirmButton = {
                 TextButton(onClick = {
                     pendingVoice = false
                     vm.requestVoiceEnable { ok -> if (ok) vm.setControlMode(ControlMode.VOICE) }
-                }) { Text("确认开启") }
+                }) { Text("确认开启", color = Brand) }
             },
             dismissButton = {
                 TextButton(onClick = { pendingVoice = false }) { Text("取消") }
@@ -360,7 +415,7 @@ private fun WidgetRow(
     Column {
         Row(verticalAlignment = Alignment.CenterVertically) {
             Column(modifier = Modifier.weight(1f)) {
-                Text(widget.label, style = MaterialTheme.typography.titleSmall)
+                Text(widget.label, style = MaterialTheme.typography.bodySmall, fontWeight = FontWeight.SemiBold)
                 Text(
                     if (widget.kind == com.aixiaohuadb.service.WidgetKind.MACRO) "宏" else "指令",
                     style = MaterialTheme.typography.labelSmall,
@@ -368,7 +423,7 @@ private fun WidgetRow(
                 )
             }
             TextButton(onClick = { onLockChange(widget.id, !widget.locked) }) {
-                Text(if (widget.locked) "已锁定" else "未锁定")
+                Text(if (widget.locked) "已锁定" else "未锁定", color = if (widget.locked) Brand else Muted)
             }
             TextButton(onClick = onRemove) { Text("移除", color = Danger) }
         }

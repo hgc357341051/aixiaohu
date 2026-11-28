@@ -20,11 +20,15 @@ class OverlayControlViewModel(private val container: AppContainer) : ViewModel()
     val macros: StateFlow<List<MacroConfig>> = OverlayStore.macros
     val pendingMacro: StateFlow<MacroConfig?> = OverlayStore.pendingMacro
     val controlMode: StateFlow<ControlMode> = OverlayStore.controlMode
+    val overlayEnabled: StateFlow<Boolean> = OverlayStore.overlayEnabled
     val voiceEnabled: StateFlow<Boolean> = container.voiceLifecycle.voiceEnabled
     val voiceState = container.voiceLifecycle.state
     val bindings = container.macroBindingStore.bindings
 
     fun setControlMode(mode: ControlMode) = OverlayStore.setControlMode(mode)
+
+    /** 宏库里的「关闭悬浮窗」：停服务 + 持久化，重开时自动拉起服务。 */
+    fun setOverlayEnabled(enabled: Boolean) = OverlayStore.setOverlayEnabled(enabled)
 
     fun requestVoiceEnable(onResult: (Boolean) -> Unit) = viewModelScope.launch {
         val result = container.voiceLifecycle.enable(VoiceStartReason.OVERLAY_SWITCH)

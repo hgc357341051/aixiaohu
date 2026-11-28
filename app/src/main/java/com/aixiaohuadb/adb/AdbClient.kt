@@ -330,7 +330,7 @@ class AdbClient(
         if (!device.supportsMultiTouchCapture) {
             return CommandResult(
                 false,
-                "触摸设备使用 Type A 旧协议（缺少 ABS_MT_SLOT/TRACKING_ID），无法注入多指；请改用无障碍模式",
+                "触摸设备使用 Type A 旧协议（缺少 ABS_MT_SLOT/TRACKING_ID），sendevent 无法注入多指；单指仍可用 input tap/swipe，多指请走无障碍",
                 attempted = false,
             )
         }

@@ -29,10 +29,18 @@ class SettingsStore(private val context: Context) : com.aixiaohuadb.voice.VoiceS
         val FEEDBACK_VIBRATION = booleanPreferencesKey("feedback_vibration")
         val FEEDBACK_OVERLAY = booleanPreferencesKey("feedback_overlay")
         val TEMP_ALLOW = booleanPreferencesKey("temp_allow")
+        val ONBOARDING_DONE = booleanPreferencesKey("onboarding_done_v1")
         val TAU_COARSE = floatPreferencesKey("tau_coarse")
         val TAU_FINE = floatPreferencesKey("tau_fine")
         val TAU_CMD = floatPreferencesKey("tau_cmd")
     }
+
+    /** 引导完成标记；key 不存在视为未完成。null 仅用于 UI 首帧「尚未读取」哨兵。 */
+    val onboardingDoneFlow: Flow<Boolean> = context.settingsDataStore.data.map { p ->
+        p[Keys.ONBOARDING_DONE] ?: false
+    }
+
+    suspend fun setOnboardingDone() = put(Keys.ONBOARDING_DONE, true)
 
     /** 语音子系统总开关，默认 false；唯一真源，冷启动只读取不自动启动 */
     override val voiceEnabledFlow: Flow<Boolean> = context.settingsDataStore.data.map { p ->

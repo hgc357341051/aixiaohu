@@ -4,6 +4,7 @@ import android.os.Bundle
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
+import androidx.core.view.WindowInsetsControllerCompat
 import androidx.lifecycle.viewmodel.compose.viewModel
 import com.aixiaohuadb.App
 import com.aixiaohuadb.ui.theme.VoiceCtlTheme
@@ -11,14 +12,19 @@ import com.aixiaohuadb.ui.theme.VoiceCtlTheme
 class MainActivity : ComponentActivity() {
 
     override fun onCreate(savedInstanceState: Bundle?) {
-        // targetSdk 35 在 Android 15+ 强制 edge-to-edge：显式接管并把图标设为浅色，
-        // 由 AppNavHost 的 systemBarsPadding() 统一给内容让出状态栏 / 导航栏安全区。
-        // 必须在 super.onCreate 之前调用，否则窗口已进入 edge-to-edge 状态。
-        enableEdgeToEdge(
-            statusBarStyle = androidx.activity.SystemBarStyle.dark(android.graphics.Color.TRANSPARENT),
-            navigationBarStyle = androidx.activity.SystemBarStyle.light(android.graphics.Color.TRANSPARENT, android.graphics.Color.BLACK),
-        )
+        // edge-to-edge：状态栏/导航栏透明，内容由 Compose 侧 systemBarsPadding 避让。
+        // 必须在 super.onCreate 之前，否则窗口已进入非沉浸式状态。
+        enableEdgeToEdge()
         super.onCreate(savedInstanceState)
+
+        // GAME OPS 强制深空底 #060A12（见 themes.xml / colors.xml），
+        // 因此系统栏图标必须恒为浅色。显式接管而不是依赖 SystemBarStyle 的参数语义，
+        // 避免不同 ROM / 系统深浅模式下出现白底深图标或图标不可见。
+        WindowInsetsControllerCompat(window, window.decorView).apply {
+            isAppearanceLightStatusBars = false
+            isAppearanceLightNavigationBars = false
+        }
+
         val app = application as App
         setContent {
             VoiceCtlTheme {

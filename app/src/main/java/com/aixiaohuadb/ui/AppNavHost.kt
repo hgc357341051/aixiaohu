@@ -5,6 +5,7 @@ import android.content.Context
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.layout.imePadding
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.systemBarsPadding
 import androidx.compose.material3.Text
@@ -50,6 +51,7 @@ import com.aixiaohuadb.ui.panel.PanelScreen
 import com.aixiaohuadb.ui.permissions.PermissionsScreen
 import com.aixiaohuadb.ui.settings.SettingsScreen
 import com.aixiaohuadb.ui.settings.SettingsViewModel
+import com.aixiaohuadb.ui.theme.Bg
 import com.aixiaohuadb.ui.theme.Panel
 import com.aixiaohuadb.ui.theme.PanelInk
 import com.aixiaohuadb.ui.theme.PillShape
@@ -69,6 +71,19 @@ fun AppNavHost(
     val uiState by vm.ui.collectAsState()
     var shadeOpen by remember { mutableStateOf(false) }
 
+    // 引导完成状态：持久化后冷启动直达主页，不再每次强制走 onboarding。
+    // 用 null 区分「尚未读取完成」，期间显示纯深空底，避免首帧闪现引导页。
+    val onboardingDone by container.settingsStore.onboardingDoneFlow.collectAsState(initial = null)
+    val persistScope = rememberCoroutineScope()
+    val markOnboardingDone: () -> Unit = {
+        persistScope.launch { container.settingsStore.setOnboardingDone() }
+    }
+    if (onboardingDone == null) {
+        Box(Modifier.fillMaxSize().background(Bg))
+        return
+    }
+    val startDestination = if (onboardingDone == true) "home/disabled" else "onboarding"
+
     // 面板 / 映射 / 悬浮设置共用同一 ViewModel，避免 OverlayStore 多实例观察不一致。
     val overlayVm: OverlayControlViewModel = viewModel(
         factory = SimpleVmFactory { OverlayControlViewModel(container) },
@@ -78,6 +93,15 @@ fun AppNavHost(
     // 旧日志里 nav.navigate("home") 曾直接抛 IllegalArgumentException 导致 FATAL。
     val navigateSafe: (String, NavOptionsBuilder.() -> Unit) -> Unit = { route, options ->
         runCatching { nav.navigate(route, options) }
+    }
+
+    val startRecordingAndBackground: () -> Unit = {
+        com.aixiaohuadb.service.OverlayControlService.startRecording(context)
+        // 先让服务真正处理 START_RECORD（添加录制层），再切后台；
+        // 立即 moveTaskToBack 会让 startService 落到后台限制里，被静默拒绝。
+        android.os.Handler(android.os.Looper.getMainLooper()).postDelayed({
+            (context as? Activity)?.moveTaskToBack(true)
+        }, 600L)
     }
 
     val navigateTab: (String) -> Unit = navigateTab@{ route ->
@@ -113,12 +137,16 @@ fun AppNavHost(
         }
     }
 
-    Box(modifier = Modifier.fillMaxSize().systemBarsPadding()) {
-        NavHost(navController = nav, startDestination = "onboarding") {
+    Box(modifier = Modifier.fillMaxSize().systemBarsPadding().imePadding()) {
+        NavHost(navController = nav, startDestination = startDestination) {
             composable("onboarding") {
                 OnboardingScreen(
-                    onNext = { nav.navigate("permissions") },
+                    onNext = {
+                        markOnboardingDone()
+                        nav.navigate("permissions")
+                    },
                     onSkip = {
+                        markOnboardingDone()
                         nav.navigate("home/disabled") { popUpTo("onboarding") { inclusive = true } }
                     },
                 )
@@ -127,30 +155,41 @@ fun AppNavHost(
                 PermissionsScreen(
                     onBack = { nav.popBackStack() },
                     onGranted = {
+                        markOnboardingDone()
                         // 授予权限只启动非语音服务；语音仍需在设置或悬浮面板显式开启。
                         vm.startServices(context)
                         nav.navigate("home/disabled") { popUpTo("permissions") { inclusive = true } }
                     },
                     onManualOnly = {
+                        markOnboardingDone()
                         nav.navigate("home/disabled") { popUpTo("permissions") { inclusive = true } }
                     },
                 )
             }
             composable("home/{state}") {
+                val homeMacros by overlayVm.macros.collectAsState()
                 HomeScreen(
                     uiState = uiState,
+                    macros = homeMacros,
                     onTab = navigateTab,
                     onNotification = { shadeOpen = true },
                     onOpenWindow = vm::openWindow,
                     onPause = vm::pause,
                     onExit = vm::requestExit,
                     onResume = vm::resume,
+                    onRunMacro = vm::runMacro,
+                    onEditMacro = { macroId -> nav.navigate("macro_editor/$macroId") },
+                    onNewMacro = startRecordingAndBackground,
+                    onManageMacros = { nav.navigate("macros") },
                 )
             }
             composable("macros") {
                 val macros by overlayVm.macros.collectAsState()
+                val overlayEnabled by overlayVm.overlayEnabled.collectAsState()
                 MacrosScreen(
                     macros = macros,
+                    overlayEnabled = overlayEnabled,
+                    onToggleOverlay = overlayVm::setOverlayEnabled,
                     onBack = { nav.popBackStack() },
                     onTab = navigateTab,
                     onRun = { macroId ->
@@ -159,14 +198,7 @@ fun AppNavHost(
                     },
                     onEdit = { macroId -> nav.navigate("macro_editor/$macroId") },
                     onDelete = { macroId -> OverlayStore.removeMacro(macroId) },
-                    onNew = {
-                        com.aixiaohuadb.service.OverlayControlService.startRecording(context)
-                        // 先让服务真正处理 START_RECORD（添加录制层），再切后台；
-                        // 立即 moveTaskToBack 会让 startService 落到后台限制里，被静默拒绝。
-                        android.os.Handler(android.os.Looper.getMainLooper()).postDelayed({
-                            (context as? Activity)?.moveTaskToBack(true)
-                        }, 600L)
-                    },
+                    onNew = startRecordingAndBackground,
                 )
             }
             composable("macro_editor/{macroId}") { entry ->
@@ -232,15 +264,7 @@ fun AppNavHost(
                         nav.navigate("home/executing") { launchSingleTop = true }
                     },
                     onManageMacros = { nav.navigate("macros") },
-                    onNewMacro = {
-                        // 录制入口：拉起悬浮服务并回到游戏，由顶部胶囊控制录制。
-                        com.aixiaohuadb.service.OverlayControlService.startRecording(context)
-                        // 先让服务真正处理 START_RECORD（添加录制层），再切后台；
-                        // 立即 moveTaskToBack 会让 startService 落到后台限制里，被静默拒绝。
-                        android.os.Handler(android.os.Looper.getMainLooper()).postDelayed({
-                            (context as? Activity)?.moveTaskToBack(true)
-                        }, 600L)
-                    },
+                    onNewMacro = startRecordingAndBackground,
                 )
             }
             composable("adb") {
@@ -248,6 +272,13 @@ fun AppNavHost(
                     vm = viewModel(factory = SimpleVmFactory { AdbViewModel(container, context.applicationContext) }),
                     onBack = { nav.popBackStack() },
                     onTab = navigateTab,
+                    onStartAdbRecord = {
+                        // 从链路页发起增强录制，随后切回游戏；延迟与服务处理保持一致。
+                        com.aixiaohuadb.service.OverlayControlService.startAdbRecording(context)
+                        android.os.Handler(android.os.Looper.getMainLooper()).postDelayed({
+                            (context as? Activity)?.moveTaskToBack(true)
+                        }, 600L)
+                    },
                 )
             }
             composable("mapping") {
